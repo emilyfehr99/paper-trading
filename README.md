@@ -78,6 +78,23 @@ The workflow `.github/workflows/paper-scheduled-tick.yml` runs **`python -m alpa
 
 **Caveats:** GitHub cron is UTC and can drift a few minutes; the bot still only acts inside `TRADE_START` / `TRADE_END`. Do not run the same paper keys in Actions and on your laptop at the same time (Alpaca connection limits + duplicate orders). For a full trading-day loop with websockets, prefer `--day-session` on a VPS or your machine.
 
+### Daily robustness + trade focus (ranked symbols)
+
+Workflow **Daily robustness + trade focus** (`.github/workflows/paper-robustness-daily.yml`) runs **`--robustness`** on a historical window (default **95** calendar days ending **yesterday**). It produces:
+
+- Full markdown: cost grid, walk-forward, sweep, regimes, time-of-day, benchmarks (unchanged).
+- **`reports/day_trade_recommendations_<end>.json`** plus **`reports/day_trade_recommendations_latest.json`**: `focus_symbols` (names with ≥5 simulated trades) and `symbols_ranked` (expectancy $/trade, PnL, win rate, R).
+
+Download the run **artifact**, copy `day_trade_recommendations_latest.json` next to your bot (e.g. into `reports/`), or set **`RECOMMENDATIONS_JSON`** in `.env` to that file. Live / scheduled ticks then **evaluate `focus_symbols` first** (still subject to risk rules and live signals).
+
+Optional repo **Variable** `ROBUSTNESS_LOOKBACK_DAYS` (integer) shortens the window if the job times out.
+
+Local:
+
+```bash
+python -m alpaca_day_bot --robustness --start 2025-12-01 --end 2026-04-16
+```
+
 ## Outputs
 - `./state/ledger.sqlite3`: fills/orders/positions ledger
 - `./reports/`: daily + weekly summaries

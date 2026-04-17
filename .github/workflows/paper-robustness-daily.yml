@@ -1,0 +1,70 @@
+# Full --robustness: cost grid, walk-forward, param sweep, regimes, benchmarks,
+# plus day_trade_recommendations_*.json (symbols ranked for day-trade focus).
+#
+# Optional repo variable: ROBUSTNESS_LOOKBACK_DAYS (default 95 calendar days before end).
+
+name: Daily robustness + trade focus
+
+on:
+  workflow_dispatch:
+  schedule:
+    # ~8:15 AM US Eastern (standard); during DST = 7:15 AM ET (pre-open).
+    - cron: "15 13 * * 1-5"
+
+concurrency:
+  group: alpaca-paper-robustness
+  cancel-in-progress: false
+
+jobs:
+  robustness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Compute date window
+        id: win
+        env:
+          LOOKBACK_DAYS: ${{ vars.ROBUSTNESS_LOOKBACK_DAYS }}
+        run: |
+          python3 << 'PY'
+          import os
+          from datetime import date, timedelta
+
+          raw = os.environ.get("LOOKBACK_DAYS", "").strip()
+          lookback = int(raw) if raw else 95
+          end = date.today() - timedelta(days=1)
+          start = end - timedelta(days=lookback)
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write(f"start={start.isoformat()}\n")
+              f.write(f"end={end.isoformat()}\n")
+          PY
+
+      - name: Run robustness + recommendations
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: |
+          mkdir -p reports
+          python -m alpaca_day_bot --robustness --start "${{ steps.win.outputs.start }}" --end "${{ steps.win.outputs.end }}"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robustness-${{ steps.win.outputs.start }}-to-${{ steps.win.outputs.end }}-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn

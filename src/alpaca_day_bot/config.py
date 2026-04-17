@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     # Storage
     state_dir: str = Field(default="state", alias="STATE_DIR")
     reports_dir: str = Field(default="reports", alias="REPORTS_DIR")
+    # Optional path to day_trade_recommendations_*.json; default tries reports/day_trade_recommendations_latest.json
+    recommendations_json: str | None = Field(default=None, alias="RECOMMENDATIONS_JSON")
 
     def tzinfo(self) -> ZoneInfo:
         return ZoneInfo(self.market_tz)

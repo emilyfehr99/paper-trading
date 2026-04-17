@@ -381,6 +381,61 @@ def expectancy_r(trades: list[Trade]) -> float | None:
     return float(np.mean(rs))
 
 
+@dataclass(frozen=True)
+class SymbolDaytradeRec:
+    """Per-symbol stats from a backtest, used to rank names for day-trade focus."""
+
+    symbol: str
+    trades: int
+    total_pnl_usd: float
+    win_rate: float | None
+    expectancy_usd: float | None
+    expectancy_r: float | None
+
+
+def symbol_daytrade_recommendations(
+    trades: list[Trade], *, min_trades: int = 5
+) -> tuple[list[SymbolDaytradeRec], list[str]]:
+    """
+    Aggregate closed trades by symbol and rank by expectancy ($/trade), then total PnL.
+
+    Returns:
+        (all ranked rows with at least 1 trade, focus_symbols with trades >= min_trades)
+    """
+    by_sym: dict[str, list[Trade]] = {}
+    for t in trades:
+        by_sym.setdefault(t.symbol, []).append(t)
+
+    rows: list[SymbolDaytradeRec] = []
+    for sym, ts in sorted(by_sym.items()):
+        pnls = [x.pnl for x in ts]
+        rs = [x.pnl_r for x in ts if x.pnl_r is not None]
+        n = len(ts)
+        wr = float(sum(1 for p in pnls if p > 0) / n) if n else None
+        exp = float(np.mean(pnls)) if pnls else None
+        exp_r = float(np.mean(rs)) if rs else None
+        rows.append(
+            SymbolDaytradeRec(
+                symbol=sym,
+                trades=n,
+                total_pnl_usd=float(sum(pnls)),
+                win_rate=wr,
+                expectancy_usd=exp,
+                expectancy_r=exp_r,
+            )
+        )
+
+    rows.sort(
+        key=lambda r: (
+            -(r.expectancy_usd if r.expectancy_usd is not None else -1e18),
+            -r.total_pnl_usd,
+            -r.trades,
+        )
+    )
+    focus = [r.symbol for r in rows if r.trades >= min_trades]
+    return rows, focus
+
+
 def turnover_from_trades(trades: list[Trade], *, start_equity: float) -> float | None:
     """
     Turnover proxy: total traded notional / starting equity.

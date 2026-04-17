@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import threading
@@ -30,6 +31,7 @@ from alpaca_day_bot.backtest import (
     buy_and_hold_returns,
     compute_spy_regimes,
     label_trade_regime,
+    symbol_daytrade_recommendations,
 )
 
 
@@ -80,6 +82,27 @@ def _try_acquire_single_instance_lock(state_dir: Path) -> object | None:
     return fp
 
 
+def _ordered_symbols(settings) -> list[str]:
+    """Put `focus_symbols` from robustness JSON first (same universe as SYMBOLS)."""
+    base = list(settings.symbols)
+    path_s = settings.recommendations_json
+    p = Path(path_s) if path_s else Path(settings.reports_dir) / "day_trade_recommendations_latest.json"
+    if not p.is_file():
+        return base
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        focus = [x for x in (data.get("focus_symbols") or []) if x in base]
+        rest = [s for s in base if s not in focus]
+        if focus:
+            log.info(
+                "symbol_order from recommendations",
+                extra={"extra_json": {"path": str(p), "focus_first": focus}},
+            )
+        return focus + rest
+    except Exception:
+        return base
+
+
 def _run_in_window_trading_cycle(
     *,
     settings,
@@ -107,7 +130,7 @@ def _run_in_window_trading_cycle(
     if scan_due:
         last_signal_scan_ts = t0
         candidates: list[dict] = []
-        for sym in settings.symbols:
+        for sym in _ordered_symbols(settings):
             df_1m_s = _run_sync(buffer.snapshot_df(sym))
             df_15m_s = _run_sync(buffer.snapshot_resampled_df(sym, "15min"))
             row = strategy.evaluate_setup(symbol=sym, df_1m=df_1m_s, df_15m=df_15m_s)
@@ -145,7 +168,7 @@ def _run_in_window_trading_cycle(
             except Exception:
                 pass
 
-    for sym in settings.symbols:
+    for sym in _ordered_symbols(settings):
         if executor.has_position(sym):
             continue
 
@@ -572,6 +595,7 @@ def _run_sync(coro):
 
 
 def _run_backtest(settings, *, start: str | None, end: str | None, robustness: bool) -> None:
+    from alpaca.data.enums import DataFeed
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
@@ -588,6 +612,7 @@ def _run_backtest(settings, *, start: str | None, end: str | None, robustness: b
         timeframe=TimeFrame.Minute,
         start=start_dt,
         end=end_dt,
+        feed=DataFeed.IEX,
     )
     bars = data_client.get_stock_bars(req)
     df = bars.df  # multi-index: (symbol, timestamp)
@@ -734,6 +759,7 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
     bh = buy_and_hold_returns(bars_by_symbol)
     # Time of day
     tod = time_of_day_breakdown(base.trades)
+    sym_recs, focus_syms = symbol_daytrade_recommendations(base.trades, min_trades=5)
     # Regimes
     adx_reg, vol_reg = compute_spy_regimes(bars_by_symbol)
 
@@ -788,6 +814,24 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
     lines.append(f"- **Turnover (x start eq)**: {fmt(getattr(base, 'turnover', None))}")
     lines.append(f"- **Avg hold (min)**: {fmt(getattr(base, 'avg_hold_minutes', None))}")
     lines.append(f"- **Trades**: {len(base.trades)}")
+    lines.append("")
+
+    lines.append("### Day-trade focus (ranked from backtest, not live advice)")
+    lines.append(
+        "- **How to read**: symbols sorted by historical **expectancy $/trade** in this window; "
+        "`focus_symbols` has names with at least **5** simulated trades (less noise)."
+    )
+    if not sym_recs:
+        lines.append("- No closed trades in base run — widen date range or relax strategy.")
+    else:
+        lines.append(f"- **focus_symbols** (≥5 trades): `{', '.join(focus_syms) if focus_syms else 'none'}`")
+        for r in sym_recs[:12]:
+            lines.append(
+                f"- **{r.symbol}**: n={r.trades}, total_pnl ${r.total_pnl_usd:,.2f}, "
+                f"win% {fmt_pct(r.win_rate)}, exp ${fmt(r.expectancy_usd)}, expR {fmt(r.expectancy_r)}"
+            )
+        if len(sym_recs) > 12:
+            lines.append(f"- _…{len(sym_recs) - 12} more in JSON_")
     lines.append("")
 
     lines.append("### Time-of-day performance (by entry time, NY)")
@@ -859,5 +903,41 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
     lines.append("")
 
     out.write_text("\n".join(lines), encoding="utf-8")
+
+    best_tod_payload: dict | None = None
+    nonempty_tod = [b for b in tod if b.trades >= 5]
+    if nonempty_tod:
+        bt = max(nonempty_tod, key=lambda b: (b.expectancy if b.expectancy is not None else -1e18))
+        best_tod_payload = {
+            "label": bt.label,
+            "trades": bt.trades,
+            "expectancy_usd": bt.expectancy,
+            "expectancy_r": bt.expectancy_r,
+        }
+
+    rec_payload = {
+        "generated_at_utc": datetime.now(tz=timezone.utc).isoformat(),
+        "backtest_window": {"start": str(start_dt.date()), "end": str(end_dt.date())},
+        "disclaimer": "Historical simulation only; not investment advice. Paper trading.",
+        "configured_slippage_bps": settings.slippage_bps,
+        "configured_commission_bps": settings.commission_bps,
+        "open_delay_minutes": settings.open_delay_minutes,
+        "market_context_filter": settings.market_context_filter,
+        "base_expectancy_usd": base.expectancy,
+        "base_expectancy_r": getattr(base, "expectancy_r", None),
+        "min_trades_for_focus": 5,
+        "focus_symbols": focus_syms,
+        "symbols_ranked": [asdict(r) for r in sym_recs],
+        "best_time_of_day_ny": best_tod_payload,
+        "robustness_report_path": str(out),
+    }
+    reports_dir = Path(settings.reports_dir)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    json_path = reports_dir / f"day_trade_recommendations_{end_dt.date()}.json"
+    latest_path = reports_dir / "day_trade_recommendations_latest.json"
+    json_blob = json.dumps(rec_payload, indent=2, default=str)
+    json_path.write_text(json_blob, encoding="utf-8")
+    latest_path.write_text(json_blob, encoding="utf-8")
+    print(f"Wrote day-trade recommendations JSON to: {json_path}")
     return str(out)
 
