@@ -1,25 +1,68 @@
-# Paper trading: one strategy pass per run. Schedule: every 15 minutes Mon–Fri (UTC).
-# GitHub may delay runs slightly under load. The bot exits quickly outside TRADE_START/TRADE_END.
+# Paper trading: one strategy pass per run when US equities session is open (America/New_York).
+# Schedule: every 15 min on weekdays, UTC hours that overlap RTH; a gate skips outside TRADE_*.
+# workflow_dispatch always runs the tick (for testing).
 #
-# Setup:
-#   Repo → Settings → Secrets → Actions → add APCA_API_KEY_ID and APCA_API_SECRET_KEY (paper keys).
-#
-# Optional: fork and disable workflow until secrets are set (Actions remain off on fork by default).
+# Optional repo Variables: GHA_MARKET_TRADE_START, GHA_MARKET_TRADE_END (HH:MM, default 9:35 / 15:50).
 
 name: Paper scheduled tick
 
 on:
   workflow_dispatch:
   schedule:
-    # Every 15 minutes, Monday–Friday (UTC).
-    - cron: "*/15 * * * 1-5"
+    # Every 15 min, Mon–Fri, UTC13–21 only (rough overlap with US RTH); exact window enforced below.
+    - cron: "*/15 13-21 * * 1-5"
 
 concurrency:
   group: alpaca-paper-scheduled-tick
   cancel-in-progress: false
 
 jobs:
+  market_open:
+    runs-on: ubuntu-latest
+    outputs:
+      open: ${{ steps.gate.outputs.open }}
+    steps:
+      - name: US regular session gate (NY time)
+        id: gate
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MARKET_TRADE_START: ${{ vars.GHA_MARKET_TRADE_START }}
+          MARKET_TRADE_END: ${{ vars.GHA_MARKET_TRADE_END }}
+        run: |
+          python3 << 'PY'
+          import os
+          from datetime import datetime, time as dt_time
+          from zoneinfo import ZoneInfo
+
+          def parse_hm(s: str) -> dt_time:
+              s = s.strip()
+              h, m = s.split(":", 1)
+              return dt_time(int(h), int(m))
+
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          if event == "workflow_dispatch":
+              out = "true"
+          else:
+              start_s = (os.environ.get("MARKET_TRADE_START") or "").strip() or "9:35"
+              end_s = (os.environ.get("MARKET_TRADE_END") or "").strip() or "15:50"
+              start = parse_hm(start_s)
+              end = parse_hm(end_s)
+              ny = ZoneInfo("America/New_York")
+              now = datetime.now(ny)
+              if now.weekday() >= 5:
+                  out = "false"
+              else:
+                  mt = now.time()
+                  out = "true" if (start <= mt <= end) else "false"
+              print(f"ny={now.isoformat()} window={start_s}-{end_s} open={out}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as gh:
+              gh.write(f"open={out}\n")
+          PY
+
   tick:
+    needs: market_open
+    if: needs.market_open.outputs.open == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

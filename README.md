@@ -68,9 +68,13 @@ Waits until the configured trading window opens, trades until it closes, then ex
 python -m alpaca_day_bot --day-session
 ```
 
-### GitHub Actions (scheduled tick, every 15 minutes on weekdays)
+### GitHub Actions (scheduled tick, every 15 minutes during US session)
 
-The workflow `.github/workflows/paper-scheduled-tick.yml` runs **`python -m alpaca_day_bot --scheduled-tick`** every **15 minutes, Monday–Friday (UTC cron)**. Runs can still be delayed slightly when GitHub is busy. Each run performs one REST bar warmup, one signal scan, and at most one round of order logic, then exits. The `state/` folder (SQLite ledger + lock) is cached **per New York calendar day** so daily trade counts and cooldowns survive between runs.
+The workflow `.github/workflows/paper-scheduled-tick.yml` triggers on a **weekday UTC cron** (every **15 minutes** during hours that overlap US RTH), then a **gate job** runs only the tick when **America/New_York** clock is inside **`TRADE_START`–`TRADE_END`** (defaults **9:35–15:50**, same as the bot). Outside that window or on weekends, the tick job is **skipped** (no checkout, no Alpaca calls). **Run workflow** manually still runs the tick anytime (for testing).
+
+Optional repo **Variables**: `GHA_MARKET_TRADE_START`, `GHA_MARKET_TRADE_END` (`HH:MM`) to match your `.env`. **NYSE holidays** are not modeled—on a holiday the workflow may still start during those hours; the bot may then log outside window or no data.
+
+Each run performs one REST bar warmup, one signal scan, and at most one round of order logic, then exits. The `state/` folder (SQLite ledger + lock) is cached **per New York calendar day** so daily trade counts and cooldowns survive between runs.
 
 1. Push this repo to GitHub.
 2. **Settings → Secrets and variables → Actions**: add **`APCA_API_KEY_ID`** and **`APCA_API_SECRET_KEY`** (paper keys).
