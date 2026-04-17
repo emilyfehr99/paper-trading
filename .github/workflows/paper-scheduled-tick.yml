@@ -1,0 +1,59 @@
+# Paper trading: one strategy pass per run. Default schedule: every 10 minutes on
+# weekdays (UTC cron). The bot exits immediately outside TRADE_START/TRADE_END (MARKET_TZ).
+#
+# Setup:
+#   Repo → Settings → Secrets → Actions → add APCA_API_KEY_ID and APCA_API_SECRET_KEY (paper keys).
+#
+# Optional: fork and disable workflow until secrets are set (Actions remain off on fork by default).
+
+name: Paper scheduled tick
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 10 minutes, Monday–Friday (UTC). RTH is enforced in code via MARKET_TZ / TRADE_*.
+    - cron: "*/10 * * * 1-5"
+
+concurrency:
+  group: alpaca-paper-scheduled-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: NY market date (cache key)
+        id: nydate
+        run: |
+          echo "d=$(python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('America/New_York')).date().isoformat())")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: state
+          key: alpaca-paper-state-${{ runner.os }}-${{ steps.nydate.outputs.d }}
+          restore-keys: |
+            alpaca-paper-state-${{ runner.os }}-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Scheduled tick
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: python -m alpaca_day_bot --scheduled-tick
+
+      - name: Upload state artifact (debug / backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-state-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
+          path: state/
+          if-no-files-found: ignore
