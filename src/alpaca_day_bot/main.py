@@ -779,10 +779,20 @@ def _print_backtest_result(res) -> None:
 def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, bars_by_symbol, base) -> str:
     from pathlib import Path
 
+    def _phase(msg: str) -> None:
+        print(f"[robustness] {msg}", flush=True)
+
+    light = bool(getattr(settings, "robustness_light", False))
+
     Path(settings.reports_dir).mkdir(parents=True, exist_ok=True)
     out = Path(settings.reports_dir) / f"backtest_robustness_{start_dt.date()}_{end_dt.date()}.md"
 
-    # 1) Cost grid
+    # 1) Cost grid (full grid is slow on GitHub: ~60 backtests × huge 1m union index)
+    slip_list = [0.5, 2.0, 6.0] if light else [0.5, 1.0, 2.0, 3.0, 4.0, 6.0]
+    comm_list = [0.0, 1.0] if light else [0.0, 0.5, 1.0]
+    _phase(
+        f"cost grid ({len(slip_list)}×{len(comm_list)} runs, ROBUSTNESS_LIGHT={light})…"
+    )
     grid_rows = run_cost_sensitivity_grid(
         bars_by_symbol=bars_by_symbol,
         starting_equity=settings.starting_equity_usd,
@@ -790,8 +800,8 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
         max_gross_exposure_pct=settings.max_gross_exposure_pct,
         stop_loss_atr_mult=settings.stop_loss_atr_mult,
         take_profit_r_mult=settings.take_profit_r_mult,
-        slippage_bps_list=[0.5, 1.0, 2.0, 3.0, 4.0, 6.0],
-        commission_bps_list=[0.0, 0.5, 1.0],
+        slippage_bps_list=slip_list,
+        commission_bps_list=comm_list,
         strategy_params=None,
     )
     # Sort by sharpe then return
@@ -801,6 +811,7 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
     )
 
     # 2) Walk-forward
+    _phase("walk-forward folds…")
     folds = run_walk_forward(
         bars_by_symbol=bars_by_symbol,
         starting_equity=settings.starting_equity_usd,
@@ -812,19 +823,28 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
         commission_bps=settings.commission_bps,
         start_dt=start_dt,
         end_dt=end_dt,
-        test_window_days=7,
-        step_days=7,
-        min_trades_per_fold=30,
+        test_window_days=14 if light else 7,
+        step_days=14 if light else 7,
+        min_trades_per_fold=15 if light else 30,
         strategy_params=None,
     )
 
     # 3) Small param sweep (multiple-testing visibility)
-    sweep_grid = [
-        {"rsi_pullback_max": r, "volume_confirm_mult": v, "atr_regime_max_mult": a}
-        for r in (30.0, 35.0, 40.0)
-        for v in (1.0, 1.2, 1.4)
-        for a in (1.5, 2.0, 2.5)
-    ]
+    if light:
+        sweep_grid = [
+            {"rsi_pullback_max": r, "volume_confirm_mult": v, "atr_regime_max_mult": a}
+            for r in (35.0, 40.0)
+            for v in (1.0, 1.2)
+            for a in (2.0, 2.5)
+        ]
+    else:
+        sweep_grid = [
+            {"rsi_pullback_max": r, "volume_confirm_mult": v, "atr_regime_max_mult": a}
+            for r in (30.0, 35.0, 40.0)
+            for v in (1.0, 1.2, 1.4)
+            for a in (1.5, 2.0, 2.5)
+        ]
+    _phase(f"parameter sweep ({len(sweep_grid)} runs)…")
     sweep_rows = run_param_sweep(
         bars_by_symbol=bars_by_symbol,
         starting_equity=settings.starting_equity_usd,
@@ -891,6 +911,11 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
 
     lines = []
     lines.append(f"## Backtest robustness report ({start_dt.date()} → {end_dt.date()})")
+    if light:
+        lines.append(
+            "_**ROBUSTNESS_LIGHT**: smaller cost grid, wider walk-forward windows, "
+            "and fewer sweep points (faster CI; less exhaustive than a full local run)._"
+        )
     lines.append("")
     lines.append("### Base run (configured costs)")
     lines.append(f"- **Total return**: {fmt_pct(base.total_return)}")
@@ -991,6 +1016,7 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
     lines.append("- Interpretation: if best ≫ median, you may be overfitting the backtest (false discovery risk).")
     lines.append("")
 
+    _phase("writing markdown + recommendations JSON…")
     out.write_text("\n".join(lines), encoding="utf-8")
 
     best_tod_payload: dict | None = None
@@ -1019,6 +1045,7 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
         "symbols_ranked": [asdict(r) for r in sym_recs],
         "best_time_of_day_ny": best_tod_payload,
         "robustness_report_path": str(out),
+        "robustness_light": light,
     }
     reports_dir = Path(settings.reports_dir)
     reports_dir.mkdir(parents=True, exist_ok=True)

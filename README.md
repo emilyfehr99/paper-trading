@@ -93,6 +93,8 @@ Download the run **artifact**, copy `day_trade_recommendations_latest.json` next
 
 Optional repo **Variable** `ROBUSTNESS_LOOKBACK_DAYS` (integer) shortens the window if the job times out.
 
+The scheduled workflow sets **`ROBUSTNESS_LIGHT=true`** so the job finishes in reasonable time (smaller cost grid, wider walk-forward steps, fewer sweep combos). For a full exhaustive grid locally, run with `ROBUSTNESS_LIGHT=false` (default locally if unset).
+
 Local:
 
 ```bash

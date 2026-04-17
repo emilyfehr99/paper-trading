@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     signal_accuracy_enabled: bool = Field(default=True, alias="SIGNAL_ACCURACY_ENABLED")
     signal_accuracy_min_age_minutes: float = Field(default=15.0, alias="SIGNAL_ACCURACY_MIN_AGE_MINUTES")
 
+    # Robustness: smaller cost grid / walk-forward / sweep (GitHub Actions sets true by default in workflow).
+    robustness_light: bool = Field(default=False, alias="ROBUSTNESS_LIGHT")
+
     # Storage
     state_dir: str = Field(default="state", alias="STATE_DIR")
     reports_dir: str = Field(default="reports", alias="REPORTS_DIR")
