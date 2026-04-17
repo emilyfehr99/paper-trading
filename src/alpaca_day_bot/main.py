@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from alpaca_day_bot.config import load_settings
+from alpaca_day_bot.data.news import fetch_news_for_symbol, news_bundle_should_block
 from alpaca_day_bot.data.stream import BarBuffer, MarketDataStreamer
 from alpaca_day_bot.logging_utils import setup_json_logging
 from alpaca_day_bot.reporting.report import write_daily_report, write_weekly_report
@@ -103,6 +104,55 @@ def _ordered_symbols(settings) -> list[str]:
         return base
 
 
+def _label_buy_signals_forward_returns(
+    *,
+    ledger: Ledger,
+    buffer: BarBuffer,
+    settings,
+    t0: datetime,
+    market_day: date,
+) -> None:
+    if not settings.signal_accuracy_enabled:
+        return
+    pending = ledger.list_unlabeled_buy_signal_rows(
+        market_day=market_day,
+        tz=settings.tzinfo(),
+        now_utc=t0,
+        min_age_minutes=float(settings.signal_accuracy_min_age_minutes),
+    )
+    for signal_id, ts_s, sym, feat_json in pending:
+        df = _run_sync(buffer.snapshot_df(sym))
+        if df is None or getattr(df, "empty", True):
+            continue
+        try:
+            feat = json.loads(feat_json)
+            entry = feat.get("close")
+            if entry is None:
+                continue
+            entry_f = float(entry)
+            if entry_f <= 0:
+                continue
+        except Exception:
+            continue
+        try:
+            ts_sig = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if ts_sig.tzinfo is None:
+            ts_sig = ts_sig.replace(tzinfo=timezone.utc)
+        horizon_m = (t0 - ts_sig).total_seconds() / 60.0
+        now_px = float(df["close"].iloc[-1])
+        ret = (now_px - entry_f) / entry_f
+        ledger.record_forward_return_label(
+            signal_id=signal_id,
+            evaluated_ts=t0,
+            price_at_label=now_px,
+            entry_close=entry_f,
+            return_pct=ret,
+            horizon_minutes=horizon_m,
+        )
+
+
 def _run_in_window_trading_cycle(
     *,
     settings,
@@ -178,15 +228,38 @@ def _run_in_window_trading_cycle(
         if sig is None:
             continue
 
+        feat: dict = dict(sig.features) if sig.features else {}
+        action = sig.action
+        reason = sig.reason
+
+        if sig.action == "BUY" and settings.news_fetch_enabled:
+            bundle = fetch_news_for_symbol(
+                symbol=sym,
+                provider=settings.news_provider,
+                alpaca_api_key_id=settings.apca_api_key_id,
+                alpaca_secret_key=settings.apca_api_secret_key,
+                alphavantage_api_key=settings.alphavantage_api_key,
+                lookback_hours=float(settings.news_lookback_hours),
+                limit=int(settings.news_limit),
+            )
+            feat["news"] = bundle
+            if news_bundle_should_block(
+                bundle,
+                settings.news_gate_mode,
+                int(settings.news_busy_min_articles),
+            ):
+                action = "HOLD"
+                reason = "news_gate"
+
         ledger.record_signal(
             ts=t0,
             symbol=sig.symbol,
-            action=sig.action,
-            reason=sig.reason,
-            features=sig.features,
+            action=action,
+            reason=reason,
+            features=feat,
         )
 
-        if sig.action != "BUY":
+        if action != "BUY":
             continue
 
         if df_1m is None or getattr(df_1m, "empty", True):
@@ -272,6 +345,13 @@ def _run_in_window_trading_cycle(
                 extra={"extra_json": {"symbol": sym, "reason": res.reason}},
             )
 
+    _label_buy_signals_forward_returns(
+        ledger=ledger,
+        buffer=buffer,
+        settings=settings,
+        t0=t0,
+        market_day=market_day,
+    )
     return last_signal_scan_ts
 
 
@@ -436,6 +516,9 @@ def run(
                 "max_daily_loss_pct": settings.max_daily_loss_pct,
                 "daily_profit_target_usd": settings.daily_profit_target_usd,
                 "market_data_mode": settings.market_data_mode,
+                "news_gate_mode": settings.news_gate_mode,
+                "news_provider": settings.news_provider,
+                "signal_accuracy_enabled": settings.signal_accuracy_enabled,
             }
         },
     )
@@ -501,7 +584,9 @@ def run(
         finally:
             try:
                 if last_report_day is not None:
-                    write_daily_report(db_path, settings.reports_dir, last_report_day)
+                    write_daily_report(
+                        db_path, settings.reports_dir, last_report_day, market_tz=settings.market_tz
+                    )
                     write_weekly_report(db_path, settings.reports_dir, last_report_day, days=7)
             except Exception:
                 pass
@@ -526,7 +611,9 @@ def run(
                 last_report_day = market_day
             elif market_day != last_report_day:
                 # Write report for previous day.
-                write_daily_report(db_path, settings.reports_dir, last_report_day)
+                write_daily_report(
+                    db_path, settings.reports_dir, last_report_day, market_tz=settings.market_tz
+                )
                 write_weekly_report(db_path, settings.reports_dir, last_report_day, days=7)
                 last_report_day = market_day
 
@@ -568,7 +655,9 @@ def run(
         # Write a report for current market day on shutdown too.
         try:
             if last_report_day is not None:
-                write_daily_report(db_path, settings.reports_dir, last_report_day)
+                write_daily_report(
+                    db_path, settings.reports_dir, last_report_day, market_tz=settings.market_tz
+                )
                 write_weekly_report(db_path, settings.reports_dir, last_report_day, days=7)
         except Exception:
             pass

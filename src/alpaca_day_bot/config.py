@@ -85,6 +85,21 @@ class Settings(BaseSettings):
     # Live diagnostics: periodic log of closest-to-BUY symbols (see signal_scan in logs).
     signal_scan_interval_s: float = Field(default=60.0, alias="SIGNAL_SCAN_INTERVAL_S")
 
+    # News: alpaca (default) | alphavantage | both — see https://www.alphavantage.co/documentation/
+    news_provider: str = Field(default="alpaca", alias="NEWS_PROVIDER")
+    alphavantage_api_key: str | None = Field(default=None, alias="ALPHAVANTAGE_API_KEY")
+
+    # Alpaca Market Data news (plan-dependent). Gate modes: off | log_only | skip_if_any | skip_if_busy
+    news_fetch_enabled: bool = Field(default=True, alias="NEWS_FETCH_ENABLED")
+    news_lookback_hours: float = Field(default=6.0, alias="NEWS_LOOKBACK_HOURS")
+    news_limit: int = Field(default=8, alias="NEWS_LIMIT")
+    news_gate_mode: str = Field(default="log_only", alias="NEWS_GATE_MODE")
+    news_busy_min_articles: int = Field(default=5, alias="NEWS_BUSY_MIN_ARTICLES")
+
+    # Signal "accuracy": label BUY rows with forward return vs signal-time close after min wall-clock age.
+    signal_accuracy_enabled: bool = Field(default=True, alias="SIGNAL_ACCURACY_ENABLED")
+    signal_accuracy_min_age_minutes: float = Field(default=15.0, alias="SIGNAL_ACCURACY_MIN_AGE_MINUTES")
+
     # Storage
     state_dir: str = Field(default="state", alias="STATE_DIR")
     reports_dir: str = Field(default="reports", alias="REPORTS_DIR")

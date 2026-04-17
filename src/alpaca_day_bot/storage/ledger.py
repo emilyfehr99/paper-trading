@@ -69,6 +69,16 @@ class Ledger:
               reason TEXT NOT NULL,
               features_json TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS forward_return_labels (
+              signal_id INTEGER PRIMARY KEY,
+              evaluated_ts TEXT NOT NULL,
+              price_at_label REAL NOT NULL,
+              entry_close REAL NOT NULL,
+              return_pct REAL NOT NULL,
+              horizon_minutes REAL NOT NULL,
+              FOREIGN KEY (signal_id) REFERENCES signals(id)
+            );
             """
         )
         self._conn.commit()
@@ -218,8 +228,8 @@ class Ledger:
         action: str,
         reason: str,
         features: dict[str, Any] | None = None,
-    ) -> None:
-        self._conn.execute(
+    ) -> int:
+        cur = self._conn.execute(
             """
             INSERT INTO signals (ts, symbol, action, reason, features_json)
             VALUES (?, ?, ?, ?, ?)
@@ -230,6 +240,73 @@ class Ledger:
                 action,
                 reason,
                 (None if features is None else json.dumps(features, default=str)),
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def list_unlabeled_buy_signal_rows(
+        self,
+        *,
+        market_day: date,
+        tz: ZoneInfo,
+        now_utc: datetime,
+        min_age_minutes: float,
+    ) -> list[tuple[int, str, str, str]]:
+        """Returns (signal_id, ts_iso, symbol, features_json) for BUY rows needing a label."""
+        start = datetime.combine(market_day, time(0, 0, 0), tzinfo=tz).astimezone(timezone.utc)
+        end = start + timedelta(days=1)
+        start_s, end_s = start.isoformat(), end.isoformat()
+        cur = self._conn.execute(
+            """
+            SELECT s.id, s.ts, s.symbol, s.features_json
+            FROM signals s
+            LEFT JOIN forward_return_labels f ON f.signal_id = s.id
+            WHERE s.action = 'BUY'
+              AND s.ts >= ? AND s.ts < ?
+              AND f.signal_id IS NULL
+            """,
+            (start_s, end_s),
+        )
+        rows_out: list[tuple[int, str, str, str]] = []
+        for sid, ts_s, sym, feat in cur.fetchall():
+            if not feat:
+                continue
+            try:
+                ts_p = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if ts_p.tzinfo is None:
+                ts_p = ts_p.replace(tzinfo=timezone.utc)
+            age_m = (now_utc - ts_p).total_seconds() / 60.0
+            if age_m < float(min_age_minutes):
+                continue
+            rows_out.append((int(sid), ts_s, str(sym), str(feat)))
+        return rows_out
+
+    def record_forward_return_label(
+        self,
+        *,
+        signal_id: int,
+        evaluated_ts: datetime,
+        price_at_label: float,
+        entry_close: float,
+        return_pct: float,
+        horizon_minutes: float,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO forward_return_labels
+              (signal_id, evaluated_ts, price_at_label, entry_close, return_pct, horizon_minutes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(signal_id),
+                evaluated_ts.isoformat(),
+                float(price_at_label),
+                float(entry_close),
+                float(return_pct),
+                float(horizon_minutes),
             ),
         )
         self._conn.commit()

@@ -104,6 +104,10 @@ python -m alpaca_day_bot --robustness --start 2025-12-01 --end 2026-04-16
 - `./reports/`: daily + weekly summaries
 - `./state/logs/`: structured JSON logs
 
+## News + measured “accuracy”
+- **News**: On each **BUY** candidate, the bot fetches headlines and attaches them to the signal row. Set **`NEWS_PROVIDER`**: `alpaca` (Alpaca `NewsClient`, plan-dependent), `alphavantage` ([Alpha Vantage **NEWS_SENTIMENT**](https://www.alphavantage.co/documentation/) — put **`ALPHAVANTAGE_API_KEY`** in `.env` only; free tier is ~5 calls/min so avoid `both` with many symbols), or `both` (merge + dedupe by headline). **`NEWS_GATE_MODE`** defaults to `log_only` (never blocks). Set `skip_if_any` / `skip_if_busy` + **`NEWS_BUSY_MIN_ARTICLES`** to block on coverage. **Never commit API keys**; rotate any key that was pasted into chat or logs.
+- **Accuracy (forward return)**: After **`SIGNAL_ACCURACY_MIN_AGE_MINUTES`** (default 15), a later run labels each **BUY** with the return from the signal-time **close** (in `features`) to the **latest 1m close** in the buffer, and stores it in SQLite (`forward_return_labels`). The **daily report** shows **directional hit rate** and mean/median forward return. This is a **price proxy**, not bracket fill PnL or a guarantee of live performance.
+
 ## Notes
 - This is **not financial advice** and is for paper simulation and research only.
 - V1 is deliberately conservative: **long-only**, strict limits, circuit breakers, and reconciliation on every loop.

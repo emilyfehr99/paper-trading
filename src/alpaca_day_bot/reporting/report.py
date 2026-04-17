@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from alpaca_day_bot.reporting.accuracy import forward_accuracy_for_calendar_day
+
 
 @dataclass(frozen=True)
 class ReportSummary:
@@ -51,7 +53,9 @@ def daily_summary(db_path: str, day: date) -> ReportSummary:
     return ReportSummary(day, start_equity, end_equity, pnl, pnl_pct, max_gross, trades=int(trades))
 
 
-def write_daily_report(db_path: str, reports_dir: str, day: date) -> str:
+def write_daily_report(
+    db_path: str, reports_dir: str, day: date, *, market_tz: str = "America/New_York"
+) -> str:
     Path(reports_dir).mkdir(parents=True, exist_ok=True)
     s = daily_summary(db_path, day)
     out = Path(reports_dir) / f"{day.isoformat()}.md"
@@ -77,6 +81,26 @@ def write_daily_report(db_path: str, reports_dir: str, day: date) -> str:
         max_dd = _max_drawdown(ser)
         sharpe_intraday = _sharpe_from_returns(ser.pct_change().dropna(), annualization=252.0 * 6.5 * 60.0 / 5.0)
 
+    acc = forward_accuracy_for_calendar_day(db_path, day, market_tz=market_tz)
+    acc_lines: list[str] = []
+    if acc is not None:
+        hit_pct = (acc.directional_hits / acc.labeled_count) if acc.labeled_count else 0.0
+        acc_lines = [
+            "",
+            "### Signal directional accuracy (labeled BUYs)",
+            f"- **Labeled signals**: {acc.labeled_count}",
+            f"- **Directional hit rate** (forward return > 0): {hit_pct*100:.1f}%",
+            f"- **Mean forward return**: {fmt_pct(acc.mean_return_pct)}",
+            f"- **Median forward return**: {fmt_pct(acc.median_return_pct)}",
+            f"- _{acc.note}_",
+        ]
+    else:
+        acc_lines = [
+            "",
+            "### Signal directional accuracy (labeled BUYs)",
+            "- No labeled BUY signals for this calendar day yet (needs a later tick after the min age).",
+        ]
+
     lines = [
         f"## Paper trading report: {day.isoformat()}",
         "",
@@ -87,6 +111,7 @@ def write_daily_report(db_path: str, reports_dir: str, day: date) -> str:
         f"- **Max drawdown (from snapshots)**: {fmt_pct(max_dd)}",
         f"- **Sharpe (snapshot returns, approx.)**: {('n/a' if sharpe_intraday is None else f'{sharpe_intraday:.2f}')}",
         f"- **Trade updates (fills)**: {s.trades}",
+        *acc_lines,
         "",
         "Notes:",
         "- Equity snapshots are taken periodically during runtime.",
