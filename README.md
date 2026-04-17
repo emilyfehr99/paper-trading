@@ -68,9 +68,9 @@ Waits until the configured trading window opens, trades until it closes, then ex
 python -m alpaca_day_bot --day-session
 ```
 
-### GitHub Actions (scheduled tick every ~10 minutes)
+### GitHub Actions (scheduled tick, every minute on weekdays)
 
-The workflow `.github/workflows/paper-scheduled-tick.yml` runs **`python -m alpaca_day_bot --scheduled-tick`** on a cron. Each run performs one REST bar warmup, one signal scan, and at most one round of order logic, then exits—suitable for GitHub-hosted runners. The `state/` folder (SQLite ledger + lock) is cached **per New York calendar day** so daily trade counts and cooldowns survive between runs.
+The workflow `.github/workflows/paper-scheduled-tick.yml` runs **`python -m alpaca_day_bot --scheduled-tick`** every **minute, Monday–Friday (UTC cron)**—about as often as GitHub’s `schedule` allows (runs can still be delayed slightly when GitHub is busy). Each run performs one REST bar warmup, one signal scan, and at most one round of order logic, then exits. The `state/` folder (SQLite ledger + lock) is cached **per New York calendar day** so daily trade counts and cooldowns survive between runs.
 
 1. Push this repo to GitHub.
 2. **Settings → Secrets and variables → Actions**: add **`APCA_API_KEY_ID`** and **`APCA_API_SECRET_KEY`** (paper keys).

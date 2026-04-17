@@ -1,5 +1,6 @@
-# Paper trading: one strategy pass per run. Default schedule: every 10 minutes on
-# weekdays (UTC cron). The bot exits immediately outside TRADE_START/TRADE_END (MARKET_TZ).
+# Paper trading: one strategy pass per run. Schedule: every minute Mon–Fri (UTC), the
+# maximum practical cadence for `schedule` workflows. GitHub may delay runs slightly under load.
+# The bot exits quickly outside TRADE_START/TRADE_END (MARKET_TZ). Watch Alpaca rate limits.
 #
 # Setup:
 #   Repo → Settings → Secrets → Actions → add APCA_API_KEY_ID and APCA_API_SECRET_KEY (paper keys).
@@ -11,8 +12,8 @@ name: Paper scheduled tick
 on:
   workflow_dispatch:
   schedule:
-    # Every 10 minutes, Monday–Friday (UTC). RTH is enforced in code via MARKET_TZ / TRADE_*.
-    - cron: "*/10 * * * 1-5"
+    # Every minute, Monday–Friday (UTC). For denser checks than this, use a always-on host, not GHA.
+    - cron: "* * * * 1-5"
 
 concurrency:
   group: alpaca-paper-scheduled-tick
@@ -24,6 +25,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
 
       - name: NY market date (cache key)
         id: nydate
