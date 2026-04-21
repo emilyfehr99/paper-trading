@@ -240,6 +240,131 @@ def _run_in_window_trading_cycle(
             except Exception:
                 pass
 
+    def _try_submit_entry(
+        *,
+        sym: str,
+        action: str,
+        feat: dict,
+        df_1m,
+    ) -> None:
+        """
+        Single entry attempt with full checks + consistent ledger/risk logging.
+        Used by both the direct rules path and the ML-ranked path.
+        """
+        nonlocal equity, gross, open_positions
+
+        if action not in ("BUY", "SHORT"):
+            return
+        if df_1m is None or getattr(df_1m, "empty", True):
+            return
+        if executor.has_position(sym):
+            return
+
+        # Optional TAAPI confirmation layer (stocks RSI/MACD).
+        if (
+            (settings.indicator_provider or "").strip().lower() == "taapi"
+            and bool(settings.taapi_confirm_on_trade)
+            and (settings.taapi_secret or "").strip()
+        ):
+            ti = fetch_taapi_indicators_for_stock(secret=settings.taapi_secret or "", symbol=sym)
+            feat["taapi"] = {
+                "rsi_1m": ti.rsi_1m,
+                "rsi_15m": ti.rsi_15m,
+                "macd_1m": ti.macd_1m,
+                "macd_signal_1m": ti.macd_signal_1m,
+            }
+            if action == "BUY":
+                if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
+                    if not bool(getattr(settings, "taapi_fail_open", True)):
+                        return
+                else:
+                    ok = (
+                        ti.rsi_1m <= float(settings.rsi_pullback_max)
+                        and ti.rsi_15m >= float(settings.htf_rsi_min)
+                        and ti.macd_1m >= ti.macd_signal_1m
+                    )
+                    if not ok:
+                        return
+            else:
+                if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
+                    if not bool(getattr(settings, "taapi_fail_open", True)):
+                        return
+                else:
+                    ok = (
+                        ti.rsi_15m <= float(settings.htf_rsi_max_short)
+                        and ti.rsi_1m >= float(settings.rsi_rebound_min_short)
+                        and ti.macd_1m <= ti.macd_signal_1m
+                    )
+                    if not ok:
+                        return
+
+        last_close = float(df_1m["close"].iloc[-1])
+        last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
+        stop_dist = max(0.01, last_range * settings.stop_loss_atr_mult)
+        if action == "BUY":
+            stop_price = last_close - stop_dist
+            tp_price = last_close + stop_dist * settings.take_profit_r_mult
+        else:
+            stop_price = last_close + stop_dist
+            tp_price = last_close - stop_dist * settings.take_profit_r_mult
+        min_tick_buffer = max(0.25, abs(last_close) * 0.005)
+        if action == "BUY":
+            stop_price = min(stop_price, last_close - min_tick_buffer)
+            tp_price = max(tp_price, last_close + min_tick_buffer)
+        else:
+            stop_price = max(stop_price, last_close + min_tick_buffer)
+            tp_price = min(tp_price, last_close - min_tick_buffer)
+        if tp_price <= 0:
+            return
+
+        rd = risk.decide_entry(
+            symbol=sym,
+            equity=equity,
+            gross_exposure_usd=gross,
+            open_positions=open_positions,
+            now_utc=t0,
+            trading_date=market_day,
+            price=last_close,
+            stop_distance=stop_dist,
+        )
+        if not rd.allow:
+            return
+
+        qty_int = int(float(rd.qty))
+        if qty_int <= 0:
+            return
+
+        if observe_only:
+            risk.register_trade(sym, t0)
+            return
+
+        if action == "BUY":
+            res = executor.submit_bracket_buy(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
+            side = "buy"
+        else:
+            res = executor.submit_bracket_short(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
+            side = "sell"
+
+        ledger.record_order_intent(
+            ts=t0,
+            symbol=sym,
+            side=side,
+            notional_usd=rd.notional_usd,
+            stop_price=stop_price,
+            take_profit_price=tp_price,
+            client_order_id=res.client_order_id,
+            alpaca_order_id=res.alpaca_order_id,
+            submitted=res.submitted,
+            reason=res.reason,
+            extra={"qty": qty_int, "action": action},
+        )
+        if res.submitted:
+            risk.register_trade(sym, t0)
+            # Refresh risk state after opening a position
+            equity = executor.get_account_equity()
+            gross = executor.gross_exposure_usd()
+            open_positions = executor.open_positions_count()
+
     ml_bundle = None
     if bool(getattr(settings, "model_enabled", False)):
         ml_bundle = _load_ml_model(getattr(settings, "model_path", "state/models/latest.joblib"))
@@ -258,6 +383,9 @@ def _run_in_window_trading_cycle(
         feat: dict = dict(sig.features) if sig.features else {}
         action = sig.action
         reason = sig.reason
+        # Add a couple fields so inference can use them as features.
+        feat["reason"] = reason
+        feat["signal_ts"] = t0.isoformat()
 
         if sig.action == "BUY" and settings.news_fetch_enabled:
             bundle = fetch_news_for_symbol(
@@ -302,173 +430,7 @@ def _run_in_window_trading_cycle(
 
         ledger.record_signal(ts=t0, symbol=sig.symbol, action=action, reason=reason, features=feat)
 
-        if action not in ("BUY", "SHORT"):
-            continue
-
-        if df_1m is None or getattr(df_1m, "empty", True):
-            continue
-
-        # Optional TAAPI confirmation layer (stocks RSI/MACD).
-        # We only call TAAPI when we already have a trade candidate, to keep API calls low.
-        if (
-            (settings.indicator_provider or "").strip().lower() == "taapi"
-            and bool(settings.taapi_confirm_on_trade)
-            and (settings.taapi_secret or "").strip()
-        ):
-            ti = fetch_taapi_indicators_for_stock(secret=settings.taapi_secret or "", symbol=sym)
-            feat["taapi"] = {
-                "rsi_1m": ti.rsi_1m,
-                "rsi_15m": ti.rsi_15m,
-                "macd_1m": ti.macd_1m,
-                "macd_signal_1m": ti.macd_signal_1m,
-            }
-            if action == "BUY":
-                if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
-                    if not bool(getattr(settings, "taapi_fail_open", True)):
-                        action = "HOLD"
-                        reason = "taapi_missing"
-                else:
-                    ok = (
-                        ti.rsi_1m <= float(settings.rsi_pullback_max)
-                        and ti.rsi_15m >= float(settings.htf_rsi_min)
-                        and ti.macd_1m >= ti.macd_signal_1m
-                    )
-                    if not ok:
-                        action = "HOLD"
-                        reason = "taapi_block"
-            else:
-                # SHORT: require 15m RSI bearish bias + 1m MACD bearish + 1m RSI rebound.
-                if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
-                    if not bool(getattr(settings, "taapi_fail_open", True)):
-                        action = "HOLD"
-                        reason = "taapi_missing"
-                else:
-                    ok = (
-                        ti.rsi_15m <= float(settings.htf_rsi_max_short)
-                        and ti.rsi_1m >= float(settings.rsi_rebound_min_short)
-                        and ti.macd_1m <= ti.macd_signal_1m
-                    )
-                    if not ok:
-                        action = "HOLD"
-                        reason = "taapi_block"
-        last_close = float(df_1m["close"].iloc[-1])
-        last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
-        stop_dist = max(0.01, last_range * settings.stop_loss_atr_mult)
-        if action == "BUY":
-            stop_price = last_close - stop_dist
-            tp_price = last_close + stop_dist * settings.take_profit_r_mult
-        else:
-            # SHORT: stop above, take-profit below
-            stop_price = last_close + stop_dist
-            tp_price = last_close - stop_dist * settings.take_profit_r_mult
-        # Alpaca validation: exits must be at least $0.01 away from base price, but base_price
-        # can differ slightly from last_close on submission. Use a conservative buffer.
-        # Use a larger buffer to avoid base_price rounding issues (base_price may differ from
-        # the last bar close due to market order pricing / fractional cents in quotes).
-        # Use a buffer that scales with price to handle base_price drift.
-        # (e.g., for $75 stock => 0.5% = $0.375)
-        min_tick_buffer = max(0.25, abs(last_close) * 0.005)
-        if action == "BUY":
-            stop_price = min(stop_price, last_close - min_tick_buffer)
-            tp_price = max(tp_price, last_close + min_tick_buffer)
-        else:
-            stop_price = max(stop_price, last_close + min_tick_buffer)
-            tp_price = min(tp_price, last_close - min_tick_buffer)
-        if tp_price <= 0:
-            continue
-
-        rd = risk.decide_entry(
-            symbol=sym,
-            equity=equity,
-            gross_exposure_usd=gross,
-            open_positions=open_positions,
-            now_utc=t0,
-            trading_date=market_day,
-            price=last_close,
-            stop_distance=stop_dist,
-        )
-
-        if not rd.allow:
-            log.info(
-                "risk_block",
-                extra={"extra_json": {"symbol": sym, "reason": rd.reason}},
-            )
-            continue
-
-        # Brackets require whole-share qty; round down and skip if too small.
-        qty_int = int(float(rd.qty))
-        if qty_int <= 0:
-            log.info("risk_block", extra={"extra_json": {"symbol": sym, "reason": "qty_lt_1"}})
-            continue
-
-        if observe_only:
-            log.info(
-                "observe_buy_signal",
-                extra={
-                    "extra_json": {
-                        "symbol": sym,
-                        "qty": qty_int,
-                        "stop_price": stop_price,
-                        "take_profit_price": tp_price,
-                    }
-                },
-            )
-            risk.register_trade(sym, t0)
-            continue
-
-        if action == "BUY":
-            res = executor.submit_bracket_buy(
-                symbol=sym,
-                qty=qty_int,
-                stop_price=stop_price,
-                take_profit_price=tp_price,
-            )
-            side = "buy"
-        else:
-            res = executor.submit_bracket_short(
-                symbol=sym,
-                qty=qty_int,
-                stop_price=stop_price,
-                take_profit_price=tp_price,
-            )
-            side = "sell"
-        ledger.record_order_intent(
-            ts=t0,
-            symbol=sym,
-            side=side,
-            notional_usd=rd.notional_usd,
-            stop_price=stop_price,
-            take_profit_price=tp_price,
-            client_order_id=res.client_order_id,
-            alpaca_order_id=res.alpaca_order_id,
-            submitted=res.submitted,
-            reason=res.reason,
-            extra={"qty": qty_int, "action": action},
-        )
-        if res.submitted:
-            risk.register_trade(sym, t0)
-            log.info(
-                f"order_submitted {sym} side={side} notional_usd={rd.notional_usd:.2f} "
-                f"stop={stop_price:.4f} tp={tp_price:.4f} "
-                f"client_order_id={res.client_order_id or '-'} "
-                f"alpaca_order_id={res.alpaca_order_id or '-'}",
-                extra={
-                    "extra_json": {
-                        "symbol": sym,
-                        "side": side,
-                        "client_order_id": res.client_order_id,
-                        "alpaca_order_id": res.alpaca_order_id,
-                        "notional_usd": rd.notional_usd,
-                        "stop_price": stop_price,
-                        "take_profit_price": tp_price,
-                    }
-                },
-            )
-        else:
-            log.info(
-                f"order_not_submitted {sym} reason={res.reason}",
-                extra={"extra_json": {"symbol": sym, "reason": res.reason}},
-            )
+        _try_submit_entry(sym=sym, action=action, feat=feat, df_1m=df_1m)
 
     if ml_bundle is not None and candidates_for_ml:
         _apply_ml_filter_rank_and_trade(
@@ -485,6 +447,7 @@ def _run_in_window_trading_cycle(
             gross=gross,
             open_positions=open_positions,
             candidates=candidates_for_ml,
+            submit_entry=_try_submit_entry,
         )
 
     _label_buy_signals_forward_returns(
@@ -512,6 +475,7 @@ def _apply_ml_filter_rank_and_trade(
     gross: float,
     open_positions: int,
     candidates: list[dict],
+    submit_entry,
 ) -> None:
     """
     Take pre-scored candidates, filter by MODEL_MIN_PROBA and submit top-N.
@@ -532,53 +496,7 @@ def _apply_ml_filter_rank_and_trade(
         if df_1m is None or getattr(df_1m, "empty", True):
             continue
 
-        if executor.has_position(sym):
-            continue
-
-        last_close = float(df_1m["close"].iloc[-1])
-        last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
-        stop_dist = max(0.01, last_range * settings.stop_loss_atr_mult)
-        if action == "BUY":
-            stop_price = last_close - stop_dist
-            tp_price = last_close + stop_dist * settings.take_profit_r_mult
-        else:
-            stop_price = last_close + stop_dist
-            tp_price = last_close - stop_dist * settings.take_profit_r_mult
-        min_tick_buffer = max(0.25, abs(last_close) * 0.005)
-        if action == "BUY":
-            stop_price = min(stop_price, last_close - min_tick_buffer)
-            tp_price = max(tp_price, last_close + min_tick_buffer)
-        else:
-            stop_price = max(stop_price, last_close + min_tick_buffer)
-            tp_price = min(tp_price, last_close - min_tick_buffer)
-        if tp_price <= 0:
-            continue
-
-        rd = risk.decide_entry(
-            symbol=sym,
-            equity=equity,
-            gross_exposure_usd=gross,
-            open_positions=open_positions,
-            now_utc=t0,
-            trading_date=market_day,
-            price=last_close,
-            stop_distance=stop_dist,
-        )
-        if not rd.allow:
-            continue
-
-        qty_int = int(float(rd.qty))
-        if qty_int <= 0:
-            continue
-
-        if observe_only:
-            risk.register_trade(sym, t0)
-            continue
-
-        if action == "BUY":
-            executor.submit_bracket_buy(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
-        else:
-            executor.submit_bracket_short(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
+        submit_entry(sym=sym, action=action, feat=feat, df_1m=df_1m)
 
 
 

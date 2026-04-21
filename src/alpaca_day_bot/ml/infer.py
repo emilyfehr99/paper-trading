@@ -49,6 +49,33 @@ def _flatten_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
         "is_buy": 1.0,
     }
 
+    # Time-of-day context (if ts captured in features; else NaN)
+    try:
+        ts_s = feat.get("ts") or feat.get("signal_ts")  # not currently set; ok
+        dt = None
+        if isinstance(ts_s, str) and ts_s:
+            from datetime import datetime, timezone
+
+            dt = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        if dt is None:
+            raise ValueError("no_ts")
+        x["hour_utc"] = float(dt.hour)
+        x["minute_utc"] = float(dt.minute)
+        x["dow_utc"] = float(dt.weekday())
+    except Exception:
+        x["hour_utc"] = float("nan")
+        x["minute_utc"] = float("nan")
+        x["dow_utc"] = float("nan")
+
+    # Setup type (reason)
+    rs = (feat.get("reason") or "").strip().lower()
+    x["setup_long_pullback"] = 1.0 if rs == "long_rsi_macd_vwap_volume" else 0.0
+    x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
+    x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
+    x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
+
     # News
     if isinstance(news, dict) and isinstance(news.get("articles"), list):
         arts = [a for a in news.get("articles", []) if isinstance(a, dict)]

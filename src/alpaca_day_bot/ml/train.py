@@ -12,7 +12,6 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, roc_auc_score
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
 from alpaca_day_bot.ml.dataset import build_signal_label_dataset
@@ -44,10 +43,11 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
     if len(X) < 50:
         raise SystemExit(f"Not enough labeled rows to train (n={len(X)}).")
 
-    # Time-aware split approximation: use a deterministic shuffle split but stratify for stability.
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=42, stratify=y if len(set(y)) > 1 else None
-    )
+    # Chronological split (reduce leakage): last 25% as test.
+    n = len(X)
+    cut = max(10, int(n * 0.75))
+    X_train, X_test = X.iloc[:cut], X.iloc[cut:]
+    y_train, y_test = y.iloc[:cut], y.iloc[cut:]
 
     # Baseline calibrated logistic regression
     logreg = Pipeline(
@@ -109,12 +109,27 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
     outp = Path(out_path)
     outp.parent.mkdir(parents=True, exist_ok=True)
 
+    # Simple threshold sweep for operational use (pick threshold maximizing accuracy on test).
+    best_thr = 0.55
+    best_acc = -1.0
+    try:
+        proba_best = model.predict_proba(X_test)[:, 1]
+        for thr in (0.50, 0.55, 0.60, 0.65, 0.70):
+            pred = (proba_best >= thr).astype(int)
+            acc_thr = float(accuracy_score(y_test, pred))
+            if acc_thr >= best_acc:
+                best_acc = acc_thr
+                best_thr = float(thr)
+    except Exception:
+        pass
+
     payload = {
         "trained_at": datetime.now(tz=timezone.utc).isoformat(),
         "db_path": db_path,
         "min_horizon_minutes": float(min_horizon_minutes),
         "provider": provider,
         "metrics": asdict(metrics),
+        "recommended_min_proba": best_thr,
         "feature_columns": list(X.columns),
         "rows_seen": int(len(meta)),
     }

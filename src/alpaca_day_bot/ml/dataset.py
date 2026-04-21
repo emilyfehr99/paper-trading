@@ -176,6 +176,13 @@ def build_signal_label_dataset(
         ts = _parse_iso_dt(ts_s) or datetime.now(tz=timezone.utc)
         now_ts = ts  # features are at signal-time; use ts as anchor for recency calcs
 
+        # Time-of-day context (UTC; stable in CI). Model can learn when signals work.
+        x_time = {
+            "hour_utc": float(ts.hour),
+            "minute_utc": float(ts.minute),
+            "dow_utc": float(ts.weekday()),
+        }
+
         feat = {}
         if feat_json and isinstance(feat_json, str):
             try:
@@ -201,6 +208,14 @@ def build_signal_label_dataset(
             "htf_ok_short": 1.0 if bool(feat.get("htf_ok_short")) else 0.0,
             "is_buy": 1.0 if str(action).upper() == "BUY" else 0.0,
         }
+        x.update(x_time)
+
+        # Setup-type context (reason string from StrategySignal)
+        rs = (reason or "").strip().lower()
+        x["setup_long_pullback"] = 1.0 if rs == "long_rsi_macd_vwap_volume" else 0.0
+        x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
+        x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
+        x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
 
         # News bundle features (stored in features["news"] by main tick)
         news = feat.get("news") if isinstance(feat.get("news"), dict) else None
