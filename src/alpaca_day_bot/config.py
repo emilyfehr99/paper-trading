@@ -133,6 +133,8 @@ class Settings(BaseSettings):
     news_limit: int = Field(default=8, alias="NEWS_LIMIT")
     news_gate_mode: str = Field(default="log_only", alias="NEWS_GATE_MODE")
     news_busy_min_articles: int = Field(default=5, alias="NEWS_BUSY_MIN_ARTICLES")
+    # If true, block entries when news_event_risk==1 (earnings/offering/halt/etc).
+    news_block_on_event_risk: bool = Field(default=True, alias="NEWS_BLOCK_ON_EVENT_RISK")
 
     # Signal "accuracy": label BUY rows with forward return vs signal-time close after min wall-clock age.
     signal_accuracy_enabled: bool = Field(default=True, alias="SIGNAL_ACCURACY_ENABLED")

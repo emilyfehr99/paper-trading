@@ -58,11 +58,17 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
     if len(X) < 50:
         raise SystemExit(f"Not enough labeled rows to train (n={len(X)}).")
 
-    # Chronological split (reduce leakage): last 25% as test.
+    # Chronological split (reduce leakage): last 25% as test, with a small embargo to reduce overlap.
     n = len(X)
     cut = max(10, int(n * 0.75))
-    X_train, X_test = X.iloc[:cut], X.iloc[cut:]
-    y_train, y_test = y.iloc[:cut], y.iloc[cut:]
+    embargo = min(50, max(5, int(n * 0.02)))
+    cut2 = min(n, cut + embargo)
+    X_train, y_train = X.iloc[:cut], y.iloc[:cut]
+    X_test, y_test = X.iloc[cut2:], y.iloc[cut2:]
+    if len(X_test) < 20:
+        # If too small after embargo, fall back to no embargo.
+        X_train, X_test = X.iloc[:cut], X.iloc[cut:]
+        y_train, y_test = y.iloc[:cut], y.iloc[cut:]
 
     # Baseline calibrated logistic regression
     logreg = Pipeline(

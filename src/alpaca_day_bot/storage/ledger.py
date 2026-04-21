@@ -84,6 +84,18 @@ class Ledger:
               horizon_minutes REAL NOT NULL,
               FOREIGN KEY (signal_id) REFERENCES signals(id)
             );
+
+            CREATE TABLE IF NOT EXISTS triple_barrier_labels (
+              signal_id INTEGER PRIMARY KEY,
+              evaluated_ts TEXT NOT NULL,
+              entry_close REAL NOT NULL,
+              tp_price REAL NOT NULL,
+              sl_price REAL NOT NULL,
+              outcome TEXT NOT NULL, -- tp | sl | timeout
+              realized_return_pct REAL NOT NULL,
+              horizon_minutes REAL NOT NULL,
+              FOREIGN KEY (signal_id) REFERENCES signals(id)
+            );
             """
             )
             self._conn.commit()
@@ -403,6 +415,41 @@ class Ledger:
                     float(price_at_label),
                     float(entry_close),
                     float(return_pct),
+                    float(horizon_minutes),
+                ),
+            )
+            self._conn.commit()
+
+    def record_triple_barrier_label(
+        self,
+        *,
+        signal_id: int,
+        evaluated_ts: datetime,
+        entry_close: float,
+        tp_price: float,
+        sl_price: float,
+        outcome: str,
+        realized_return_pct: float,
+        horizon_minutes: float,
+    ) -> None:
+        out = (outcome or "").strip().lower()
+        if out not in ("tp", "sl", "timeout"):
+            out = "timeout"
+        with self._lock:
+            self._conn.execute(
+                """
+            INSERT OR REPLACE INTO triple_barrier_labels
+              (signal_id, evaluated_ts, entry_close, tp_price, sl_price, outcome, realized_return_pct, horizon_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(signal_id),
+                    evaluated_ts.isoformat(),
+                    float(entry_close),
+                    float(tp_price),
+                    float(sl_price),
+                    str(out),
+                    float(realized_return_pct),
                     float(horizon_minutes),
                 ),
             )

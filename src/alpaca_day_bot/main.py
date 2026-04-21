@@ -18,6 +18,7 @@ from alpaca_day_bot.data.taapi import fetch_taapi_indicators_for_stock
 from alpaca_day_bot.data.stream import BarBuffer, MarketDataStreamer
 from alpaca_day_bot.logging_utils import setup_json_logging
 from alpaca_day_bot.ml.infer import load_model as _load_ml_model, predict_proba as _ml_predict_proba
+from alpaca_day_bot.ml.regime_thresholds import learn_regime_min_proba_map, write_regime_thresholds_json
 from alpaca_day_bot.reporting.report import write_daily_report, write_weekly_report
 from alpaca_day_bot.risk.manager import RiskManager, now_utc
 from alpaca_day_bot.storage.ledger import Ledger
@@ -194,6 +195,121 @@ def _label_signals_forward_returns(
             entry_close=entry_f,
             return_pct=ret,
             horizon_minutes=horizon_m,
+        )
+
+
+def _label_signals_triple_barrier(
+    *,
+    ledger: Ledger,
+    buffer: BarBuffer,
+    settings,
+    t0: datetime,
+    market_day: date,
+) -> None:
+    """
+    Triple-barrier style labeling aligned to exits:
+    - For BUY: TP if high >= tp_price before low <= sl_price; SL if low hits first; else TIMEOUT.
+    - For SHORT: TP if low <= tp_price before high >= sl_price; SL if high hits first; else TIMEOUT.
+    Uses bar path between signal_ts and now from the in-memory buffer snapshot.
+    """
+    if not settings.signal_accuracy_enabled:
+        return
+    pending = ledger.list_unlabeled_signal_rows(
+        market_day=market_day,
+        tz=settings.tzinfo(),
+        now_utc=t0,
+        min_age_minutes=float(settings.signal_accuracy_min_age_minutes),
+        actions=("BUY", "SHORT"),
+    )
+    for signal_id, ts_s, sym, action, feat_json in pending:
+        try:
+            feat = json.loads(feat_json) if feat_json else {}
+        except Exception:
+            feat = {}
+        if not isinstance(feat, dict):
+            continue
+
+        entry = feat.get("close")
+        tp = feat.get("tp_price")
+        sl = feat.get("sl_price")
+        if entry is None or tp is None or sl is None:
+            continue
+        try:
+            entry_f = float(entry)
+            tp_f = float(tp)
+            sl_f = float(sl)
+        except Exception:
+            continue
+        if entry_f <= 0 or tp_f <= 0 or sl_f <= 0:
+            continue
+
+        try:
+            ts_sig = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if ts_sig.tzinfo is None:
+            ts_sig = ts_sig.replace(tzinfo=timezone.utc)
+        horizon_m = (t0 - ts_sig).total_seconds() / 60.0
+
+        df = _run_sync(buffer.snapshot_df(sym))
+        if df is None or getattr(df, "empty", True):
+            continue
+        try:
+            import pandas as pd
+
+            dfx = df.copy()
+            dfx.index = pd.to_datetime(dfx.index, utc=True)
+            dfx = dfx.sort_index()
+            dfx = dfx[dfx.index >= ts_sig]
+        except Exception:
+            continue
+        if dfx is None or getattr(dfx, "empty", True):
+            continue
+        if not all(c in dfx.columns for c in ("high", "low", "close")):
+            continue
+
+        act = (action or "").strip().upper()
+        outcome = "timeout"
+        px_at_eval = float(dfx["close"].iloc[-1])
+
+        try:
+            for _idx, row in dfx.iterrows():
+                hi = float(row["high"])
+                lo = float(row["low"])
+                if act == "SHORT":
+                    # TP is below, SL above
+                    if lo <= tp_f:
+                        outcome = "tp"
+                        break
+                    if hi >= sl_f:
+                        outcome = "sl"
+                        break
+                else:
+                    # BUY
+                    if hi >= tp_f:
+                        outcome = "tp"
+                        break
+                    if lo <= sl_f:
+                        outcome = "sl"
+                        break
+        except Exception:
+            outcome = "timeout"
+
+        # realized return proxy at evaluation time (mark-to-market), but label is barrier-first.
+        if act == "SHORT":
+            realized_ret = (entry_f - px_at_eval) / entry_f
+        else:
+            realized_ret = (px_at_eval - entry_f) / entry_f
+
+        ledger.record_triple_barrier_label(
+            signal_id=int(signal_id),
+            evaluated_ts=t0,
+            entry_close=entry_f,
+            tp_price=tp_f,
+            sl_price=sl_f,
+            outcome=outcome,
+            realized_return_pct=float(realized_ret),
+            horizon_minutes=float(horizon_m),
         )
 
 
@@ -709,10 +825,44 @@ def _run_in_window_trading_cycle(
         feat: dict = dict(sig.features) if sig.features else {}
         action = sig.action
         reason = sig.reason
+        # Pre-filter: avoid short attempts on symbols Alpaca flags non-shortable.
+        try:
+            if action == "SHORT" and not executor.is_shortable(sym):
+                ledger.record_order_intent(
+                    ts=t0,
+                    symbol=sym,
+                    side="sell",
+                    notional_usd=0.0,
+                    stop_price=0.0,
+                    take_profit_price=0.0,
+                    client_order_id=None,
+                    alpaca_order_id=None,
+                    submitted=False,
+                    reason="not_shortable_prefilter",
+                    extra={"action": "SHORT"},
+                )
+                continue
+        except Exception:
+            pass
         # Add a couple fields so inference can use them as features.
         feat["reason"] = reason
         feat["signal_ts"] = t0.isoformat()
         feat["action"] = action
+        # Precompute barriers at signal-time for triple-barrier labels.
+        try:
+            last_close = float(feat.get("close") or df_1m["close"].iloc[-1])
+            last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
+            stop_dist = max(0.01, last_range * float(settings.stop_loss_atr_mult))
+            if action == "BUY":
+                sl_price = last_close - stop_dist
+                tp_price = last_close + stop_dist * float(settings.take_profit_r_mult)
+            else:
+                sl_price = last_close + stop_dist
+                tp_price = last_close - stop_dist * float(settings.take_profit_r_mult)
+            feat["tp_price"] = float(tp_price)
+            feat["sl_price"] = float(sl_price)
+        except Exception:
+            pass
         try:
             rlbl = _regime_label(df_1m=df_1m, df_15m=df_15m)
             if rlbl:
@@ -731,6 +881,36 @@ def _run_in_window_trading_cycle(
                 limit=int(settings.news_limit),
             )
             feat["news"] = bundle
+            # Research-backed: avoid trading into discrete news shocks (earnings/offering/halt/etc).
+            try:
+                if bool(getattr(settings, "news_block_on_event_risk", True)):
+                    arts = (bundle or {}).get("articles") if isinstance(bundle, dict) else None
+                    if isinstance(arts, list):
+                        txt = " ".join(
+                            [
+                                f"{(a.get('headline') or '')} {(a.get('summary') or '')}"
+                                for a in arts
+                                if isinstance(a, dict)
+                            ]
+                        ).lower()
+                        risk_words = (
+                            "earnings",
+                            "offering",
+                            "secondary",
+                            "sec ",
+                            "investigation",
+                            "lawsuit",
+                            "guidance",
+                            "halt",
+                            "bankruptcy",
+                            "merger",
+                            "acquisition",
+                        )
+                        if txt and any(w in txt for w in risk_words):
+                            action = "HOLD"
+                            reason = "news_event_risk"
+            except Exception:
+                pass
             if news_bundle_should_block(
                 bundle,
                 settings.news_gate_mode,
@@ -790,6 +970,13 @@ def _run_in_window_trading_cycle(
         t0=t0,
         market_day=market_day,
     )
+    _label_signals_triple_barrier(
+        ledger=ledger,
+        buffer=buffer,
+        settings=settings,
+        t0=t0,
+        market_day=market_day,
+    )
     return last_signal_scan_ts
 
 
@@ -816,11 +1003,17 @@ def _apply_ml_filter_rank_and_trade(
     if not candidates:
         return
     min_p = float(getattr(settings, "model_min_proba", 0.55))
+    # Prefer dynamic regime thresholds file if present; otherwise allow env JSON override.
     reg_map = {}
     try:
-        s = (getattr(settings, "model_min_proba_by_regime_json", "") or "").strip()
-        if s:
-            reg_map = json.loads(s)
+        p = Path(getattr(settings, "state_dir", "state")) / "regime_thresholds_latest.json"
+        if p.is_file():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            reg_map = data.get("model_min_proba_by_regime") or {}
+        else:
+            s = (getattr(settings, "model_min_proba_by_regime_json", "") or "").strip()
+            if s:
+                reg_map = json.loads(s)
     except Exception:
         reg_map = {}
     top_n = max(1, int(getattr(settings, "top_n_per_tick", 2)))
@@ -966,6 +1159,15 @@ def run(
         market_now = now_utc().astimezone(settings.tzinfo())
         market_day = market_now.date()
         try:
+            try:
+                mp_map, rows = learn_regime_min_proba_map(db_path=db_path)
+                write_regime_thresholds_json(
+                    out_path=str(Path(settings.state_dir) / "regime_thresholds_latest.json"),
+                    mp_map=mp_map,
+                    rows=rows,
+                )
+            except Exception:
+                pass
             write_daily_report(db_path, settings.reports_dir, market_day, market_tz=settings.market_tz)
             write_weekly_report(db_path, settings.reports_dir, market_day, days=7)
         finally:

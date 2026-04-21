@@ -9,6 +9,7 @@ from alpaca_day_bot.reporting.accuracy import forward_accuracy_for_calendar_day
 from alpaca_day_bot.reporting.model_diagnostics import model_diagnostics_for_day
 from alpaca_day_bot.reporting.trades import realized_trade_stats_for_day
 from alpaca_day_bot.reporting.trade_why import trade_whys_for_day
+from alpaca_day_bot.ml.regime_thresholds import learn_regime_min_proba_map
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,9 @@ def write_daily_report(
         *model_lines,
         *trade_lines,
         "",
+        "### Regime threshold suggestions (learned from ledger)",
+        *(_regime_threshold_lines(db_path)),
+        "",
         "### Trades (why this fired)",
         *(_trade_why_lines(db_path, day)),
         "",
@@ -166,6 +170,20 @@ def write_daily_report(
     out.write_text("\n".join(lines), encoding="utf-8")
     return str(out)
 
+
+def _regime_threshold_lines(db_path: str) -> list[str]:
+    try:
+        mp_map, rows = learn_regime_min_proba_map(db_path=db_path)
+    except Exception:
+        return ["- n/a"]
+    if not rows:
+        return ["- Not enough labeled rows yet."]
+    out = [f"- **Default**: 0.55", f"- **Regimes learned**: {len(mp_map)}"]
+    for r in rows[:12]:
+        thr = "n/a" if r.best_min_proba is None else f"{r.best_min_proba:.2f}"
+        hr = "n/a" if r.hit_rate is None else f"{r.hit_rate*100:.1f}%"
+        out.append(f"- **{r.regime}**: n={r.n}, thr={thr}, hit={hr}")
+    return out
 
 def _trade_why_lines(db_path: str, day: date) -> list[str]:
     rows = trade_whys_for_day(db_path, day.isoformat())
@@ -222,6 +240,34 @@ def write_weekly_report(db_path: str, reports_dir: str, week_ending: date, days:
             f"- **{d.day.isoformat()}**: PnL {fmt_money(d.pnl)} ({fmt_pct(d.pnl_pct)}), trades {d.trades}, max_gross {fmt_money(d.max_gross)}"
         )
     lines.append("")
+
+    # Meta-label take-rate / hit-rate summary (from labeled signals).
+    try:
+        conn = sqlite3.connect(db_path)
+        rr = conn.execute(
+            """
+            SELECT
+              COUNT(1) AS n_labeled,
+              SUM(CASE WHEN tb.outcome = 'tp' THEN 1 ELSE 0 END) AS n_tp
+            FROM triple_barrier_labels tb
+            """,
+        ).fetchone()
+        conn.close()
+        if rr and rr[0]:
+            n_l = int(rr[0] or 0)
+            n_tp = int(rr[1] or 0)
+            hr = (n_tp / n_l) if n_l else 0.0
+            lines.extend(
+                [
+                    "### Meta-label summary (triple-barrier outcomes)",
+                    f"- **Labeled signals**: {n_l}",
+                    f"- **TP outcomes**: {n_tp}",
+                    f"- **Hit rate (TP)**: {hr*100:.1f}%",
+                    "",
+                ]
+            )
+    except Exception:
+        pass
 
     out.write_text("\n".join(lines), encoding="utf-8")
     return str(out)

@@ -173,7 +173,8 @@ def build_signal_label_dataset(
 ) -> DatasetResult:
     """
     Build supervised dataset from:
-      signals(ts,symbol,action,reason,features_json) JOIN forward_return_labels(signal_id,...,return_pct,horizon_minutes)
+      signals(ts,symbol,action,reason,features_json) JOIN labels
+    Prefer triple_barrier_labels when present; fall back to forward_return_labels.
     """
     conn = sqlite3.connect(db_path)
     sql = """
@@ -184,15 +185,18 @@ def build_signal_label_dataset(
           s.action,
           s.reason,
           s.features_json,
-          f.return_pct,
-          f.horizon_minutes
+          COALESCE(tb.realized_return_pct, f.return_pct) AS return_pct,
+          COALESCE(tb.horizon_minutes, f.horizon_minutes) AS horizon_minutes,
+          tb.outcome AS tb_outcome
         FROM signals s
-        JOIN forward_return_labels f ON f.signal_id = s.id
+        LEFT JOIN forward_return_labels f ON f.signal_id = s.id
+        LEFT JOIN triple_barrier_labels tb ON tb.signal_id = s.id
         WHERE s.action IN ({actions})
+          AND (tb.signal_id IS NOT NULL OR f.signal_id IS NOT NULL)
     """.format(actions=",".join(["?"] * len(actions)))
     params: list[Any] = list(actions)
     if min_horizon_minutes is not None:
-        sql += " AND f.horizon_minutes >= ?"
+        sql += " AND COALESCE(tb.horizon_minutes, f.horizon_minutes) >= ?"
         params.append(float(min_horizon_minutes))
     sql += " ORDER BY s.ts ASC"
     if limit is not None:
@@ -206,7 +210,7 @@ def build_signal_label_dataset(
     y_rows: list[int] = []
     meta_rows: list[dict[str, Any]] = []
 
-    for (_sid, ts_s, sym, action, reason, feat_json, ret_pct, horizon_min) in rows:
+    for (_sid, ts_s, sym, action, reason, feat_json, ret_pct, horizon_min, tb_outcome) in rows:
         ts = _parse_iso_dt(ts_s) or datetime.now(tz=timezone.utc)
         now_ts = ts  # features are at signal-time; use ts as anchor for recency calcs
 
@@ -261,7 +265,11 @@ def build_signal_label_dataset(
 
         # Target
         ret = float(ret_pct) if ret_pct is not None else 0.0
-        y = 1 if ret > 0 else 0
+        # Meta-label: 1 iff barrier outcome reached TP; else 0. If no outcome, fallback to sign.
+        if isinstance(tb_outcome, str) and tb_outcome.strip().lower() in ("tp", "sl", "timeout"):
+            y = 1 if tb_outcome.strip().lower() == "tp" else 0
+        else:
+            y = 1 if ret > 0 else 0
 
         feats_rows.append(x)
         y_rows.append(y)
@@ -273,6 +281,7 @@ def build_signal_label_dataset(
                 "reason": reason,
                 "return_pct": ret,
                 "horizon_minutes": float(horizon_min) if horizon_min is not None else float("nan"),
+                "tb_outcome": tb_outcome,
             }
         )
 
