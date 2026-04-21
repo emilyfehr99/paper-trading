@@ -102,6 +102,11 @@ class Settings(BaseSettings):
     stop_loss_atr_mult: float = Field(default=1.5, alias="STOP_LOSS_ATR_MULT")
     take_profit_r_mult: float = Field(default=1.5, alias="TAKE_PROFIT_R_MULT")
 
+    # Smarter exits (in addition to TP/SL brackets)
+    max_hold_minutes: float = Field(default=0.0, alias="MAX_HOLD_MINUTES")  # 0 disables time-exit
+    model_exit_enabled: bool = Field(default=False, alias="MODEL_EXIT_ENABLED")
+    model_exit_min_proba: float = Field(default=0.45, alias="MODEL_EXIT_MIN_PROBA")
+
     # Shorts (paper): enable short entries and separate HTF gate.
     enable_shorts: bool = Field(default=False, alias="ENABLE_SHORTS")
     htf_rsi_max_short: float = Field(default=55.0, alias="HTF_RSI_MAX_SHORT")

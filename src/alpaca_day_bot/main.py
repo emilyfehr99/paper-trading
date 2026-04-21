@@ -196,6 +196,39 @@ def _run_in_window_trading_cycle(
     gross = executor.gross_exposure_usd()
     open_positions = executor.open_positions_count()
 
+    # Smarter exits: time-based and optional model-based exits (in addition to brackets).
+    # We base age on the latest submitted intent timestamp for that symbol from the ledger.
+    if float(getattr(settings, "max_hold_minutes", 0.0)) > 0:
+        try:
+            tz = settings.tzinfo()
+            stats = ledger.submitted_entry_stats_for_trading_date(market_day, tz)
+            last_by_symbol = stats.get("last_by_symbol") or {}
+            for sym, entry_ts in list(last_by_symbol.items()):
+                try:
+                    if not executor.has_position(sym):
+                        continue
+                    age_m = (t0 - entry_ts).total_seconds() / 60.0
+                    if age_m < float(settings.max_hold_minutes):
+                        continue
+                    res = executor.close_position_market(sym)
+                    ledger.record_order_intent(
+                        ts=t0,
+                        symbol=sym,
+                        side="close",
+                        notional_usd=0.0,
+                        stop_price=0.0,
+                        take_profit_price=0.0,
+                        client_order_id=None,
+                        alpaca_order_id=None,
+                        submitted=res.submitted,
+                        reason=f"time_exit:{res.reason}",
+                        extra={"action": "EXIT_TIME", "age_minutes": age_m},
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     scan_due = force_signal_scan or (t0 - last_signal_scan_ts) >= timedelta(
         seconds=float(settings.signal_scan_interval_s)
     )

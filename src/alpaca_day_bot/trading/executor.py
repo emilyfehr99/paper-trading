@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 from alpaca.trading.requests import (
+    ClosePositionRequest,
     MarketOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
@@ -175,6 +176,20 @@ class OrderExecutor:
         except Exception:
             oid = None
         return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
+    def close_position_market(self, symbol: str) -> ExecutionResult:
+        """
+        Close an open position at market via Alpaca close_position endpoint.
+        This should also handle canceling/replacing bracket legs on Alpaca's side.
+        """
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return ExecutionResult(False, "empty_symbol")
+        try:
+            _ = self._tc.close_position(sym, close_options=ClosePositionRequest())  # full position
+            return ExecutionResult(True, "close_submitted", client_order_id=None, alpaca_order_id=None)
+        except Exception as e:
+            return ExecutionResult(False, f"close_error:{e}", client_order_id=None, alpaca_order_id=None)
 
 
 def now_utc() -> datetime:
