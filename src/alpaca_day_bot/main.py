@@ -297,8 +297,10 @@ def _run_in_window_trading_cycle(
         # Alpaca validation: stop must be at least $0.01 away from base price.
         if action == "BUY":
             stop_price = min(stop_price, last_close - 0.02)
+            tp_price = max(tp_price, last_close + 0.02)
         else:
             stop_price = max(stop_price, last_close + 0.02)
+            tp_price = min(tp_price, last_close - 0.02)
         if tp_price <= 0:
             continue
 
