@@ -55,31 +55,39 @@ class RestBarPoller:
             self._settings.apca_api_key_id,
             self._settings.apca_api_secret_key,
         )
-        req = StockBarsRequest(
-            symbol_or_symbols=list(self._settings.symbols),
-            timeframe=TimeFrame.Minute,
-            start=start,
-            end=end,
-            feed=DataFeed.IEX,
-        )
-        bars = client.get_stock_bars(req)
-        df = bars.df
-        if df is None or getattr(df, "empty", True):
-            return []
+        def chunks(xs: list[str], n: int):
+            for i in range(0, len(xs), n):
+                yield xs[i : i + n]
+
+        symbols = list(self._settings.symbols)
+        # Alpaca endpoints can reject very large symbol lists; batch conservatively.
+        batch_n = 200
 
         out: list[BarEvent] = []
-        if isinstance(df.index, pd.MultiIndex):
-            for sym in self._settings.symbols:
-                try:
-                    sdf = df.xs(sym, level=0)
-                except Exception:
-                    continue
-                for ts, row in sdf.iterrows():
-                    out.append(self._row_to_event(str(sym), ts, row))
-        else:
-            sym = str(self._settings.symbols[0])
-            for ts, row in df.iterrows():
-                out.append(self._row_to_event(sym, ts, row))
+        for batch in chunks(symbols, batch_n):
+            req = StockBarsRequest(
+                symbol_or_symbols=batch,
+                timeframe=TimeFrame.Minute,
+                start=start,
+                end=end,
+                feed=DataFeed.IEX,
+            )
+            bars = client.get_stock_bars(req)
+            df = bars.df
+            if df is None or getattr(df, "empty", True):
+                continue
+            if isinstance(df.index, pd.MultiIndex):
+                for sym in batch:
+                    try:
+                        sdf = df.xs(sym, level=0)
+                    except Exception:
+                        continue
+                    for ts, row in sdf.iterrows():
+                        out.append(self._row_to_event(str(sym), ts, row))
+            else:
+                sym = str(batch[0])
+                for ts, row in df.iterrows():
+                    out.append(self._row_to_event(sym, ts, row))
 
         if out:
             self._wide_first_fetch = False
