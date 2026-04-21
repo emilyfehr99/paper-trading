@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     # Optional path to day_trade_recommendations_*.json; default tries reports/day_trade_recommendations_latest.json
     recommendations_json: str | None = Field(default=None, alias="RECOMMENDATIONS_JSON")
 
+    # Order type
+    # market = market-entry bracket; limit = limit-entry bracket (still uses TP/SL legs).
+    entry_order_type: str = Field(default="market", alias="ENTRY_ORDER_TYPE")
+    # For limit entries, move limit away from last price by this many bps.
+    # BUY uses (1 - bps/10_000), SHORT uses (1 + bps/10_000). 0 = use last price.
+    limit_entry_offset_bps: float = Field(default=0.0, alias="LIMIT_ENTRY_OFFSET_BPS")
+
     def tzinfo(self) -> ZoneInfo:
         return ZoneInfo(self.market_tz)
 

@@ -8,6 +8,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 from alpaca.trading.requests import (
     ClosePositionRequest,
+    LimitOrderRequest,
     MarketOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
@@ -130,6 +131,43 @@ class OrderExecutor:
             oid = None
         return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
 
+    def submit_bracket_buy_limit(
+        self,
+        *,
+        symbol: str,
+        qty: float,
+        limit_price: float,
+        stop_price: float,
+        take_profit_price: float,
+    ) -> ExecutionResult:
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
+        if limit_price <= 0 or stop_price <= 0 or take_profit_price <= 0:
+            return ExecutionResult(False, "bad_prices")
+
+        client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
+        req = LimitOrderRequest(
+            symbol=symbol,
+            qty=int(qty),
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            limit_price=round(float(limit_price), 2),
+            take_profit=TakeProfitRequest(limit_price=round(float(take_profit_price), 2)),
+            stop_loss=StopLossRequest(stop_price=round(float(stop_price), 2)),
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._tc.submit_order(order_data=req)
+        except Exception as e:
+            return ExecutionResult(False, f"submit_error:{e}", client_order_id=client_order_id, alpaca_order_id=None)
+        oid = None
+        try:
+            oid = str(getattr(order, "id", None)) if order is not None else None
+        except Exception:
+            oid = None
+        return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
     def submit_bracket_short(
         self,
         *,
@@ -170,6 +208,48 @@ class OrderExecutor:
                 client_order_id=client_order_id,
                 alpaca_order_id=None,
             )
+        oid = None
+        try:
+            oid = str(getattr(order, "id", None)) if order is not None else None
+        except Exception:
+            oid = None
+        return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
+    def submit_bracket_short_limit(
+        self,
+        *,
+        symbol: str,
+        qty: float,
+        limit_price: float,
+        stop_price: float,
+        take_profit_price: float,
+    ) -> ExecutionResult:
+        """
+        Open a short position with a limit-entry bracket.
+        """
+        if not self.is_shortable(symbol):
+            return ExecutionResult(False, "not_shortable")
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
+        if limit_price <= 0 or stop_price <= 0 or take_profit_price <= 0:
+            return ExecutionResult(False, "bad_prices")
+
+        client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
+        req = LimitOrderRequest(
+            symbol=symbol,
+            qty=int(qty),
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            limit_price=round(float(limit_price), 2),
+            take_profit=TakeProfitRequest(limit_price=round(float(take_profit_price), 2)),
+            stop_loss=StopLossRequest(stop_price=round(float(stop_price), 2)),
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._tc.submit_order(order_data=req)
+        except Exception as e:
+            return ExecutionResult(False, f"submit_error:{e}", client_order_id=client_order_id, alpaca_order_id=None)
         oid = None
         try:
             oid = str(getattr(order, "id", None)) if order is not None else None

@@ -382,11 +382,44 @@ def _run_in_window_trading_cycle(
             risk.register_trade(sym, t0)
             return
 
+        entry_type = (getattr(settings, "entry_order_type", "market") or "market").strip().lower()
+        offset_bps = float(getattr(settings, "limit_entry_offset_bps", 0.0) or 0.0)
+        limit_price = None
+        if entry_type == "limit":
+            k = (offset_bps / 10_000.0) if offset_bps > 0 else 0.0
+            if action == "BUY":
+                limit_price = last_close * (1.0 - k)
+            else:
+                limit_price = last_close * (1.0 + k)
+            limit_price = max(0.01, float(limit_price))
+
         if action == "BUY":
-            res = executor.submit_bracket_buy(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
+            if entry_type == "limit":
+                res = executor.submit_bracket_buy_limit(
+                    symbol=sym,
+                    qty=qty_int,
+                    limit_price=float(limit_price or last_close),
+                    stop_price=stop_price,
+                    take_profit_price=tp_price,
+                )
+            else:
+                res = executor.submit_bracket_buy(
+                    symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price
+                )
             side = "buy"
         else:
-            res = executor.submit_bracket_short(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
+            if entry_type == "limit":
+                res = executor.submit_bracket_short_limit(
+                    symbol=sym,
+                    qty=qty_int,
+                    limit_price=float(limit_price or last_close),
+                    stop_price=stop_price,
+                    take_profit_price=tp_price,
+                )
+            else:
+                res = executor.submit_bracket_short(
+                    symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price
+                )
             side = "sell"
 
         # Dynamic hold target (based on technical volatility + model confidence)
@@ -424,7 +457,13 @@ def _run_in_window_trading_cycle(
             alpaca_order_id=res.alpaca_order_id,
             submitted=res.submitted,
             reason=res.reason,
-            extra={"qty": qty_int, "action": action, "target_hold_minutes": target_hold},
+            extra={
+                "qty": qty_int,
+                "action": action,
+                "target_hold_minutes": target_hold,
+                "entry_order_type": entry_type,
+                "limit_price": float(limit_price) if limit_price is not None else None,
+            },
         )
         if res.submitted:
             risk.register_trade(sym, t0)
@@ -594,6 +633,11 @@ def cli() -> None:
         action="store_true",
         help="Build a daily liquid universe (writes state/universe_latest.json) and exit.",
     )
+    p.add_argument(
+        "--write-report",
+        action="store_true",
+        help="Write daily+weekly report for the current market day and exit (no trading).",
+    )
     args = p.parse_args()
     run(
         observe_only_override=bool(args.observe_only),
@@ -602,6 +646,7 @@ def cli() -> None:
         backtest=bool(args.backtest),
         robustness=bool(args.robustness),
         build_universe=bool(args.build_universe),
+        write_report=bool(args.write_report),
         start=args.start,
         end=args.end,
     )
@@ -615,6 +660,7 @@ def run(
     backtest: bool,
     robustness: bool,
     build_universe: bool = False,
+    write_report: bool = False,
     start: str | None,
     end: str | None,
 ) -> None:
@@ -666,6 +712,16 @@ def run(
 
     db_path = str(state_dir / "ledger.sqlite3")
     ledger = Ledger(db_path)
+
+    if write_report:
+        market_now = now_utc().astimezone(settings.tzinfo())
+        market_day = market_now.date()
+        try:
+            write_daily_report(db_path, settings.reports_dir, market_day, market_tz=settings.market_tz)
+            write_weekly_report(db_path, settings.reports_dir, market_day, days=7)
+        finally:
+            ledger.close()
+        return
 
     def on_trade_update(evt: TradeUpdateEvent) -> None:
         ledger.record_trade_update(evt)
