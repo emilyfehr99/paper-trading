@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     # If TAAPI is rate-limited / forbidden, do not block trades (still record taapi in features).
     taapi_fail_open: bool = Field(default=True, alias="TAAPI_FAIL_OPEN")
 
+    # ML model layer (trained from ledger labels)
+    model_enabled: bool = Field(default=False, alias="MODEL_ENABLED")
+    model_min_proba: float = Field(default=0.55, alias="MODEL_MIN_PROBA")
+    top_n_per_tick: int = Field(default=2, alias="TOP_N_PER_TICK")
+    model_path: str = Field(default="state/models/latest.joblib", alias="MODEL_PATH")
+
     # Exits (bracket-like)
     stop_loss_atr_mult: float = Field(default=1.5, alias="STOP_LOSS_ATR_MULT")
     take_profit_r_mult: float = Field(default=1.5, alias="TAKE_PROFIT_R_MULT")

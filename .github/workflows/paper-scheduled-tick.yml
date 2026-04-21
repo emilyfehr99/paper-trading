@@ -111,6 +111,8 @@ jobs:
           INDICATOR_PROVIDER: "taapi"
           TAAPI_SECRET: ${{ secrets.TAAPI_SECRET }}
           TAAPI_CONFIRM_ON_TRADE: "true"
+          # ML model layer (optional; uses state/models/latest.joblib if present)
+          MODEL_ENABLED: "true"
           UNIVERSE_ENABLED: "true"
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"

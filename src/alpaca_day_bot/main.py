@@ -17,6 +17,7 @@ from alpaca_day_bot.data.news import fetch_news_for_symbol, news_bundle_should_b
 from alpaca_day_bot.data.taapi import fetch_taapi_indicators_for_stock
 from alpaca_day_bot.data.stream import BarBuffer, MarketDataStreamer
 from alpaca_day_bot.logging_utils import setup_json_logging
+from alpaca_day_bot.ml.infer import load_model as _load_ml_model, predict_proba as _ml_predict_proba
 from alpaca_day_bot.reporting.report import write_daily_report, write_weekly_report
 from alpaca_day_bot.risk.manager import RiskManager, now_utc
 from alpaca_day_bot.storage.ledger import Ledger
@@ -239,6 +240,11 @@ def _run_in_window_trading_cycle(
             except Exception:
                 pass
 
+    ml_bundle = None
+    if bool(getattr(settings, "model_enabled", False)):
+        ml_bundle = _load_ml_model(getattr(settings, "model_path", "state/models/latest.joblib"))
+
+    candidates_for_ml: list[dict] = []
     for sym in _ordered_symbols(settings):
         if executor.has_position(sym):
             continue
@@ -272,13 +278,29 @@ def _run_in_window_trading_cycle(
                 action = "HOLD"
                 reason = "news_gate"
 
-        ledger.record_signal(
-            ts=t0,
-            symbol=sig.symbol,
-            action=action,
-            reason=reason,
-            features=feat,
-        )
+        # ML scoring (filter + rank): score candidates but don't submit yet.
+        if action in ("BUY", "SHORT") and ml_bundle is not None:
+            # is_buy feature: for now, model is trained on BUY labels; we still score SHORTs but treat them separately later
+            md = _ml_predict_proba(model_bundle=ml_bundle, features={**feat, "is_buy": 1.0 if action == "BUY" else 0.0})
+            feat["model"] = {"ok": md.ok, "provider": md.provider, "proba": md.proba, "error": md.error}
+            if md.ok and md.proba is not None:
+                feat["model_proba"] = float(md.proba)
+                candidates_for_ml.append(
+                    {
+                        "symbol": sym,
+                        "action": action,
+                        "reason": reason,
+                        "features": feat,
+                        "df_1m": df_1m,
+                        "df_15m": df_15m,
+                        "model_proba": float(md.proba),
+                    }
+                )
+                # skip immediate trade; we'll rank later
+                ledger.record_signal(ts=t0, symbol=sig.symbol, action=action, reason=reason, features=feat)
+                continue
+
+        ledger.record_signal(ts=t0, symbol=sig.symbol, action=action, reason=reason, features=feat)
 
         if action not in ("BUY", "SHORT"):
             continue
@@ -448,6 +470,23 @@ def _run_in_window_trading_cycle(
                 extra={"extra_json": {"symbol": sym, "reason": res.reason}},
             )
 
+    if ml_bundle is not None and candidates_for_ml:
+        _apply_ml_filter_rank_and_trade(
+            settings=settings,
+            observe_only=observe_only,
+            ledger=ledger,
+            executor=executor,
+            buffer=buffer,
+            strategy=strategy,
+            risk=risk,
+            t0=t0,
+            market_day=market_day,
+            equity=equity,
+            gross=gross,
+            open_positions=open_positions,
+            candidates=candidates_for_ml,
+        )
+
     _label_buy_signals_forward_returns(
         ledger=ledger,
         buffer=buffer,
@@ -456,6 +495,91 @@ def _run_in_window_trading_cycle(
         market_day=market_day,
     )
     return last_signal_scan_ts
+
+
+def _apply_ml_filter_rank_and_trade(
+    *,
+    settings,
+    observe_only: bool,
+    ledger: Ledger,
+    executor: OrderExecutor,
+    buffer: BarBuffer,
+    strategy: V1RulesSignalEngine,
+    risk: RiskManager,
+    t0: datetime,
+    market_day: date,
+    equity: float,
+    gross: float,
+    open_positions: int,
+    candidates: list[dict],
+) -> None:
+    """
+    Take pre-scored candidates, filter by MODEL_MIN_PROBA and submit top-N.
+    """
+    if not candidates:
+        return
+    min_p = float(getattr(settings, "model_min_proba", 0.55))
+    top_n = max(1, int(getattr(settings, "top_n_per_tick", 2)))
+    keep = [c for c in candidates if float(c.get("model_proba", 0.0)) >= min_p]
+    keep.sort(key=lambda c: (-float(c.get("model_proba", 0.0)), str(c.get("symbol", ""))))
+    keep = keep[:top_n]
+
+    for c in keep:
+        sym = c["symbol"]
+        action = c["action"]
+        feat = c["features"]
+        df_1m = c.get("df_1m")
+        if df_1m is None or getattr(df_1m, "empty", True):
+            continue
+
+        if executor.has_position(sym):
+            continue
+
+        last_close = float(df_1m["close"].iloc[-1])
+        last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
+        stop_dist = max(0.01, last_range * settings.stop_loss_atr_mult)
+        if action == "BUY":
+            stop_price = last_close - stop_dist
+            tp_price = last_close + stop_dist * settings.take_profit_r_mult
+        else:
+            stop_price = last_close + stop_dist
+            tp_price = last_close - stop_dist * settings.take_profit_r_mult
+        min_tick_buffer = max(0.25, abs(last_close) * 0.005)
+        if action == "BUY":
+            stop_price = min(stop_price, last_close - min_tick_buffer)
+            tp_price = max(tp_price, last_close + min_tick_buffer)
+        else:
+            stop_price = max(stop_price, last_close + min_tick_buffer)
+            tp_price = min(tp_price, last_close - min_tick_buffer)
+        if tp_price <= 0:
+            continue
+
+        rd = risk.decide_entry(
+            symbol=sym,
+            equity=equity,
+            gross_exposure_usd=gross,
+            open_positions=open_positions,
+            now_utc=t0,
+            trading_date=market_day,
+            price=last_close,
+            stop_distance=stop_dist,
+        )
+        if not rd.allow:
+            continue
+
+        qty_int = int(float(rd.qty))
+        if qty_int <= 0:
+            continue
+
+        if observe_only:
+            risk.register_trade(sym, t0)
+            continue
+
+        if action == "BUY":
+            executor.submit_bracket_buy(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
+        else:
+            executor.submit_bracket_short(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
+
 
 
 def cli() -> None:
@@ -1079,6 +1203,24 @@ def _write_robustness_report(*, settings, start_dt: datetime, end_dt: datetime, 
     lines.append(f"- **Avg hold (min)**: {fmt(getattr(base, 'avg_hold_minutes', None))}")
     lines.append(f"- **Trades**: {len(base.trades)}")
     lines.append("")
+
+    # Optional: model eval from ledger (if present in state/)
+    try:
+        from pathlib import Path as _Path
+
+        from alpaca_day_bot.ml.eval import quick_walk_forward_eval
+
+        dbp = _Path(settings.state_dir) / "ledger.sqlite3"
+        if dbp.exists():
+            _phase("ml walk-forward (ledger labels)…")
+            folds_ml = quick_walk_forward_eval(db_path=str(dbp), min_horizon_minutes=15.0)
+            lines.append("### ML quick walk-forward (from labeled signals in ledger)")
+            for i, f in enumerate(folds_ml, 1):
+                acc = "n/a" if f.test_acc is None else f"{f.test_acc*100:.1f}%"
+                lines.append(f"- **Fold {i}**: train_n={f.train_n}, test_n={f.test_n}, acc={acc}")
+            lines.append("")
+    except Exception:
+        pass
 
     lines.append("### Day-trade focus (ranked from backtest, not live advice)")
     lines.append(

@@ -1,0 +1,50 @@
+name: Train ML model (daily)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily after market close (UTC). Adjust as needed.
+    - cron: "30 22 * * 1-5"
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore state (ledger + models)
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: alpaca-paper-state-${{ runner.os }}-ml-${{ github.run_id }}
+          restore-keys: |
+            alpaca-paper-state-${{ runner.os }}-
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Train model from ledger labels
+        run: |
+          python -m alpaca_day_bot.ml.train \
+            --db state/ledger.sqlite3 \
+            --out state/models/latest.joblib \
+            --min-horizon-minutes 15
+
+      - name: Upload model artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-ml-model-${{ github.run_id }}
+          path: state/models/
+          if-no-files-found: warn
+

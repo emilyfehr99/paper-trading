@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from alpaca_day_bot.reporting.accuracy import forward_accuracy_for_calendar_day
+from alpaca_day_bot.reporting.model_diagnostics import model_diagnostics_for_day
 from alpaca_day_bot.reporting.trades import realized_trade_stats_for_day
 
 
@@ -102,6 +103,22 @@ def write_daily_report(
             "- No labeled BUY signals for this calendar day yet (needs a later tick after the min age).",
         ]
 
+    md = model_diagnostics_for_day(db_path, day)
+    model_lines: list[str] = []
+    if md is not None:
+        model_lines = [
+            "",
+            "### Model diagnostics (BUY labels)",
+            f"- **Labeled signals**: {md.n_labeled}",
+            f"- **With model probability recorded**: {md.n_with_proba}",
+        ]
+        if md.buckets:
+            for b in md.buckets:
+                hr = ("n/a" if b.hit_rate is None else f"{b.hit_rate*100:.1f}%")
+                model_lines.append(f"- **{b.bucket}**: n={b.n}, hit={hr}")
+        else:
+            model_lines.append("- Not enough rows with probability to bucket yet.")
+
     # Realized trade stats (from fills)
     tstats = realized_trade_stats_for_day(db_path, start, end)
     if tstats.trades > 0:
@@ -134,6 +151,7 @@ def write_daily_report(
         f"- **Sharpe (snapshot returns, approx.)**: {('n/a' if sharpe_intraday is None else f'{sharpe_intraday:.2f}')}",
         f"- **Trade updates (fills)**: {s.trades}",
         *acc_lines,
+        *model_lines,
         *trade_lines,
         "",
         "Notes:",
