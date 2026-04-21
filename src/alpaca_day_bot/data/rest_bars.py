@@ -47,8 +47,9 @@ class RestBarPoller:
 
         lag_m = float(self._settings.rest_bar_end_lag_minutes)
         end = datetime.now(tz=timezone.utc) - timedelta(minutes=lag_m)
-        # First fetch: enough 1m history for indicators; later: small window to save payload.
-        mins = 180 if self._wide_first_fetch else 20
+        # First fetch: enough 1m history for indicators and 15m resampled RSI warmup.
+        # 15m RSI(14) needs ~16 15m bars => ~240 minutes; add buffer.
+        mins = 360 if self._wide_first_fetch else 20
         start = end - timedelta(minutes=mins)
 
         client = StockHistoricalDataClient(
