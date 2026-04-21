@@ -56,12 +56,12 @@ class OrderExecutor:
         self,
         *,
         symbol: str,
-        notional_usd: float,
+        qty: float,
         stop_price: float,
         take_profit_price: float,
     ) -> ExecutionResult:
-        if notional_usd <= 0:
-            return ExecutionResult(False, "bad_notional")
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
         if stop_price <= 0 or take_profit_price <= 0:
             return ExecutionResult(False, "bad_exit_prices")
 
@@ -69,7 +69,7 @@ class OrderExecutor:
 
         req = MarketOrderRequest(
             symbol=symbol,
-            notional=round(float(notional_usd), 2),
+            qty=int(qty),
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.BRACKET,
@@ -98,15 +98,15 @@ class OrderExecutor:
         self,
         *,
         symbol: str,
-        notional_usd: float,
+        qty: float,
         stop_price: float,
         take_profit_price: float,
     ) -> ExecutionResult:
         """
         Open a short position with a bracket (take-profit below, stop above).
         """
-        if notional_usd <= 0:
-            return ExecutionResult(False, "bad_notional")
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
         if stop_price <= 0 or take_profit_price <= 0:
             return ExecutionResult(False, "bad_exit_prices")
 
@@ -114,7 +114,7 @@ class OrderExecutor:
 
         req = MarketOrderRequest(
             symbol=symbol,
-            notional=round(float(notional_usd), 2),
+            qty=int(qty),
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.BRACKET,

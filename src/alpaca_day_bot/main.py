@@ -294,6 +294,13 @@ def _run_in_window_trading_cycle(
             # SHORT: stop above, take-profit below
             stop_price = last_close + stop_dist
             tp_price = last_close - stop_dist * settings.take_profit_r_mult
+        # Alpaca validation: stop must be at least $0.01 away from base price.
+        if action == "BUY":
+            stop_price = min(stop_price, last_close - 0.02)
+        else:
+            stop_price = max(stop_price, last_close + 0.02)
+        if tp_price <= 0:
+            continue
 
         rd = risk.decide_entry(
             symbol=sym,
@@ -313,13 +320,19 @@ def _run_in_window_trading_cycle(
             )
             continue
 
+        # Brackets require whole-share qty; round down and skip if too small.
+        qty_int = int(float(rd.qty))
+        if qty_int <= 0:
+            log.info("risk_block", extra={"extra_json": {"symbol": sym, "reason": "qty_lt_1"}})
+            continue
+
         if observe_only:
             log.info(
                 "observe_buy_signal",
                 extra={
                     "extra_json": {
                         "symbol": sym,
-                        "notional_usd": rd.notional_usd,
+                        "qty": qty_int,
                         "stop_price": stop_price,
                         "take_profit_price": tp_price,
                     }
@@ -331,7 +344,7 @@ def _run_in_window_trading_cycle(
         if action == "BUY":
             res = executor.submit_bracket_buy(
                 symbol=sym,
-                notional_usd=rd.notional_usd,
+                qty=qty_int,
                 stop_price=stop_price,
                 take_profit_price=tp_price,
             )
@@ -339,7 +352,7 @@ def _run_in_window_trading_cycle(
         else:
             res = executor.submit_bracket_short(
                 symbol=sym,
-                notional_usd=rd.notional_usd,
+                qty=qty_int,
                 stop_price=stop_price,
                 take_profit_price=tp_price,
             )
@@ -355,6 +368,7 @@ def _run_in_window_trading_cycle(
             alpaca_order_id=res.alpaca_order_id,
             submitted=res.submitted,
             reason=res.reason,
+            extra={"qty": qty_int, "action": action},
         )
         if res.submitted:
             risk.register_trade(sym, t0)
