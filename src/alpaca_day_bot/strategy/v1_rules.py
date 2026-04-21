@@ -309,8 +309,15 @@ class V1RulesSignalEngine(BaseStrategy):
         vwap_ok_long = above_vwap if not self._aggressive_mode else True
         vol_ok_long = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
 
+        # Setup A: pullback entry (original)
         if htf_ok_long and rsi_pullback and above_ema and macd_ok_long and vwap_ok_long and vol_ok_long:
             return StrategySignal(symbol, "BUY", "long_rsi_macd_vwap_volume", features=features)
+
+        # Setup B (aggressive): momentum continuation
+        if self._aggressive_mode:
+            rsi_momo_long = float(last["rsi"]) >= 55.0
+            if htf_ok_long and rsi_momo_long and above_ema and macd_bull and vol_ok_long:
+                return StrategySignal(symbol, "BUY", "long_momo", features=features)
 
         # Short entry (optional)
         if self._enable_shorts:
@@ -321,6 +328,12 @@ class V1RulesSignalEngine(BaseStrategy):
 
             if htf_ok_short and rsi_rebound and below_ema and macd_ok_short and vwap_ok_short and vol_ok_short:
                 return StrategySignal(symbol, "SHORT", "short_rsi_macd_vwap_volume", features=features)
+
+            # Setup B (aggressive): downside momentum continuation
+            if self._aggressive_mode:
+                rsi_momo_short = float(last["rsi"]) <= 45.0
+                if htf_ok_short and rsi_momo_short and below_ema and macd_bear and vol_ok_short:
+                    return StrategySignal(symbol, "SHORT", "short_momo", features=features)
 
         # HOLD reason (keep it informative)
         if not htf_ok_long and not (self._enable_shorts and htf_ok_short):
