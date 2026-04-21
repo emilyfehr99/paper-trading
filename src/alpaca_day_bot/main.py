@@ -296,7 +296,9 @@ def _run_in_window_trading_cycle(
             tp_price = last_close - stop_dist * settings.take_profit_r_mult
         # Alpaca validation: exits must be at least $0.01 away from base price, but base_price
         # can differ slightly from last_close on submission. Use a conservative buffer.
-        min_tick_buffer = 0.05
+        # Use a larger buffer to avoid base_price rounding issues (base_price may differ from
+        # the last bar close due to market order pricing / fractional cents in quotes).
+        min_tick_buffer = 0.25
         if action == "BUY":
             stop_price = min(stop_price, last_close - min_tick_buffer)
             tp_price = max(tp_price, last_close + min_tick_buffer)

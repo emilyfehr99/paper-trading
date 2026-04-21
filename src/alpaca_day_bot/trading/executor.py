@@ -24,6 +24,41 @@ class ExecutionResult:
 class OrderExecutor:
     def __init__(self, trading_client: TradingClient) -> None:
         self._tc = trading_client
+        self._asset_cache: dict[str, dict] = {}
+
+    def _get_asset(self, symbol: str) -> dict | None:
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None
+        if sym in self._asset_cache:
+            return self._asset_cache[sym]
+        try:
+            a = self._tc.get_asset(sym)
+        except Exception:
+            return None
+        # Normalize to plain dict-like access
+        d = {}
+        for k in ("shortable", "easy_to_borrow", "tradable", "marginable", "status"):
+            try:
+                d[k] = getattr(a, k, None)
+            except Exception:
+                d[k] = None
+        self._asset_cache[sym] = d
+        return d
+
+    def is_shortable(self, symbol: str) -> bool:
+        a = self._get_asset(symbol)
+        if not a:
+            # If we can't determine, don't hard-block paper trading.
+            return True
+        shortable = a.get("shortable")
+        if shortable is False:
+            return False
+        # Some accounts expose easy_to_borrow; prefer it if present.
+        etb = a.get("easy_to_borrow")
+        if etb is False:
+            return False
+        return True
 
     def get_account_equity(self) -> float:
         acct = self._tc.get_account()
@@ -105,6 +140,8 @@ class OrderExecutor:
         """
         Open a short position with a bracket (take-profit below, stop above).
         """
+        if not self.is_shortable(symbol):
+            return ExecutionResult(False, "not_shortable")
         if qty <= 0:
             return ExecutionResult(False, "bad_qty")
         if stop_price <= 0 or take_profit_price <= 0:
