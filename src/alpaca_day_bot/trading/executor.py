@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -246,26 +247,43 @@ class OrderExecutor:
 
         client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
 
-        req = MarketOrderRequest(
-            symbol=symbol,
-            qty=int(qty),
-            side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-            order_class=OrderClass.BRACKET,
-            take_profit=TakeProfitRequest(limit_price=round(float(take_profit_price), 2)),
-            stop_loss=StopLossRequest(stop_price=round(float(stop_price), 2)),
-            client_order_id=client_order_id,
-        )
+        def _make_req(tp: float) -> MarketOrderRequest:
+            return MarketOrderRequest(
+                symbol=symbol,
+                qty=int(qty),
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.BRACKET,
+                take_profit=TakeProfitRequest(limit_price=round(float(tp), 2)),
+                stop_loss=StopLossRequest(stop_price=round(float(stop_price), 2)),
+                client_order_id=client_order_id,
+            )
 
         try:
-            order = self._tc.submit_order(order_data=req)
+            order = self._tc.submit_order(order_data=_make_req(float(take_profit_price)))
         except Exception as e:
-            return ExecutionResult(
-                False,
-                f"submit_error:{e}",
-                client_order_id=client_order_id,
-                alpaca_order_id=None,
-            )
+            # Alpaca sometimes rejects short brackets if TP is not below the actual base/entry price.
+            # If we can parse base_price from the error payload, clamp TP and retry once.
+            try:
+                msg = str(e)
+                if "take_profit.limit_price" in msg and "base_price" in msg:
+                    j = json.loads(msg[msg.index("{") : msg.rindex("}") + 1])
+                    base = float(j.get("base_price"))
+                    # ensure TP <= base - 0.05 (extra buffer beyond the 0.01 rule)
+                    tp2 = min(float(take_profit_price), base - 0.05)
+                    if tp2 > 0:
+                        order = self._tc.submit_order(order_data=_make_req(tp2))
+                    else:
+                        raise
+                else:
+                    raise
+            except Exception:
+                return ExecutionResult(
+                    False,
+                    f"submit_error:{e}",
+                    client_order_id=client_order_id,
+                    alpaca_order_id=None,
+                )
         oid = None
         try:
             oid = str(getattr(order, "id", None)) if order is not None else None
