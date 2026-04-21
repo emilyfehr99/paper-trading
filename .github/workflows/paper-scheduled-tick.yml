@@ -107,6 +107,15 @@ jobs:
           UNIVERSE_ENABLED: "true"
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"
+          # More aggressive risk + frequency (paper only)
+          MAX_POSITIONS: "10"
+          MAX_TRADES_PER_DAY: "60"
+          MAX_GROSS_EXPOSURE_PCT: "0.90"
+          RISK_PER_TRADE_PCT: "0.01"
+          PER_SYMBOL_COOLDOWN_S: "60"
+          # Loosen HTF trend gates so more setups qualify
+          HTF_RSI_MIN: "40"
+          HTF_RSI_MAX_SHORT: "60"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Upload state artifact (debug / backup)
