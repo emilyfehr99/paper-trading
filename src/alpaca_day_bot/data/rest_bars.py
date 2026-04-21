@@ -47,10 +47,10 @@ class RestBarPoller:
 
         lag_m = float(self._settings.rest_bar_end_lag_minutes)
         end = datetime.now(tz=timezone.utc) - timedelta(minutes=lag_m)
-        # First fetch: enough 1m history for indicators and 15m resampled RSI warmup.
-        # 15m RSI(14) needs ~16 15m bars => ~240 minutes; add buffer.
-        mins = 360 if self._wide_first_fetch else 20
-        start = end - timedelta(minutes=mins)
+        # First fetch: include multiple market sessions so 15m RSI(14) can be ready
+        # even early in the day (a same-day minute window may be too short).
+        # Later fetches keep a small window to reduce payload.
+        start = (end - timedelta(days=3)) if self._wide_first_fetch else (end - timedelta(minutes=20))
 
         client = StockHistoricalDataClient(
             self._settings.apca_api_key_id,
