@@ -28,6 +28,7 @@ class RiskManager:
         max_trades_per_day: int,
         max_daily_loss_pct: float,
         risk_per_trade_pct: float,
+        max_notional_per_trade_usd: float = 0.0,
         per_symbol_cooldown_s: int = 600,
         daily_profit_target_usd: float = 0.0,
     ) -> None:
@@ -36,6 +37,7 @@ class RiskManager:
         self._max_trades_per_day = max_trades_per_day
         self._max_daily_loss_pct = max_daily_loss_pct
         self._risk_per_trade_pct = risk_per_trade_pct
+        self._max_notional_per_trade_usd = float(max_notional_per_trade_usd)
         self._cooldown_s = per_symbol_cooldown_s
         self._daily_profit_target_usd = float(daily_profit_target_usd)
 
@@ -130,6 +132,11 @@ class RiskManager:
         remaining = float("inf") if max_gross is None else max(0.0, max_gross - gross_exposure_usd)
         qty = risk_budget / stop_distance
         notional = qty * price
+
+        # Hard cap per-trade notional (paper realism / user budget).
+        if self._max_notional_per_trade_usd > 0:
+            notional = min(float(notional), float(self._max_notional_per_trade_usd))
+            qty = notional / price if price > 0 else 0.0
 
         # Cap notional to remaining gross; allow fractional sizing.
         if remaining != float("inf") and notional > remaining and remaining > 0:

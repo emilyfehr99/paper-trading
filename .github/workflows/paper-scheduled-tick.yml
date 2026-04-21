@@ -122,6 +122,8 @@ jobs:
           MAX_TRADES_PER_DAY: "0"
           MAX_GROSS_EXPOSURE_PCT: "0"
           MAX_DAILY_LOSS_PCT: "0"
+          # Hard per-trade spend cap
+          MAX_NOTIONAL_PER_TRADE_USD: "20"
           RISK_PER_TRADE_PCT: "0.01"
           PER_SYMBOL_COOLDOWN_S: "60"
           # Loosen HTF trend gates so more setups qualify

@@ -707,6 +707,7 @@ def run(
         max_trades_per_day=settings.max_trades_per_day,
         max_daily_loss_pct=settings.max_daily_loss_pct,
         risk_per_trade_pct=settings.risk_per_trade_pct,
+        max_notional_per_trade_usd=settings.max_notional_per_trade_usd,
         per_symbol_cooldown_s=settings.per_symbol_cooldown_s,
         daily_profit_target_usd=settings.daily_profit_target_usd,
     )

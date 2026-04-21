@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     max_trades_per_day: int = Field(default=20, alias="MAX_TRADES_PER_DAY")
     max_daily_loss_pct: float = Field(default=0.03, alias="MAX_DAILY_LOSS_PCT")
     risk_per_trade_pct: float = Field(default=0.005, alias="RISK_PER_TRADE_PCT")
+    max_notional_per_trade_usd: float = Field(default=0.0, alias="MAX_NOTIONAL_PER_TRADE_USD")  # 0 disables
     per_symbol_cooldown_s: int = Field(default=600, alias="PER_SYMBOL_COOLDOWN_S")
     # Stop opening new trades once equity is up this much vs session start (0 = off).
     daily_profit_target_usd: float = Field(default=100.0, alias="DAILY_PROFIT_TARGET_USD")
