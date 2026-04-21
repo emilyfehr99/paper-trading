@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     volume_confirm_mult: float = Field(default=1.0, alias="VOLUME_CONFIRM_MULT")
     htf_rsi_min: float = Field(default=45.0, alias="HTF_RSI_MIN")
     atr_regime_max_mult: float = Field(default=2.5, alias="ATR_REGIME_MAX_MULT")
+    aggressive_mode: bool = Field(default=False, alias="AGGRESSIVE_MODE")
 
     # Exits (bracket-like)
     stop_loss_atr_mult: float = Field(default=1.5, alias="STOP_LOSS_ATR_MULT")

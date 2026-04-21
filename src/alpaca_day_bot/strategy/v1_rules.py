@@ -28,6 +28,7 @@ class V1RulesSignalEngine(BaseStrategy):
         htf_rsi_max_short: float = 55.0,
         rsi_rebound_min_short: float = 58.0,
         enable_shorts: bool = False,
+        aggressive_mode: bool = False,
         atr_len: int = 14,
         atr_regime_lookback: int = 50,
         atr_regime_max_mult: float = 2.0,
@@ -41,6 +42,7 @@ class V1RulesSignalEngine(BaseStrategy):
         self._htf_rsi_max_short = htf_rsi_max_short
         self._rsi_rebound_min_short = rsi_rebound_min_short
         self._enable_shorts = bool(enable_shorts)
+        self._aggressive_mode = bool(aggressive_mode)
         self._atr_len = atr_len
         self._atr_regime_lookback = atr_regime_lookback
         self._atr_regime_max_mult = atr_regime_max_mult
@@ -274,13 +276,16 @@ class V1RulesSignalEngine(BaseStrategy):
             return StrategySignal(symbol, "HOLD", "macd_not_ready")
         macd_bull_cross = (macd_now > macds_now) and (macd_prev <= macds_prev)
         macd_bear_cross = (macd_now < macds_now) and (macd_prev >= macds_prev)
+        macd_bull = (macd_now > macds_now)
+        macd_bear = (macd_now < macds_now)
 
         above_vwap = float(last["close"]) > float(last["vwap_calc"])
         below_vwap = float(last["close"]) < float(last["vwap_calc"])
         vol_sma = last.get("volume_sma")
         if pd.isna(vol_sma) or float(vol_sma) <= 0:
             return StrategySignal(symbol, "HOLD", "volume_not_ready")
-        volume_confirm = float(last["volume"]) > float(vol_sma) * float(self._volume_confirm_mult)
+        volume_ratio = float(last["volume"]) / float(vol_sma)
+        volume_confirm = volume_ratio > float(self._volume_confirm_mult)
 
         features = {
             "close": float(last["close"]),
@@ -291,7 +296,7 @@ class V1RulesSignalEngine(BaseStrategy):
             "vwap": float(last["vwap_calc"]),
             "volume": float(last["volume"]),
             "volume_sma": (None if pd.isna(vol_sma) else float(vol_sma)),
-            "volume_ratio": (None if pd.isna(vol_sma) or float(vol_sma) <= 0 else float(last["volume"]) / float(vol_sma)),
+            "volume_ratio": volume_ratio,
             "htf_rsi": float(htf_last["rsi"]) if not pd.isna(htf_last.get("rsi")) else None,
             "atr": atr,
             "atr_avg": atr_avg,
@@ -300,13 +305,21 @@ class V1RulesSignalEngine(BaseStrategy):
         }
 
         # Long entry
-        if htf_ok_long and rsi_pullback and above_ema and macd_bull_cross and above_vwap and volume_confirm:
+        macd_ok_long = macd_bull_cross if not self._aggressive_mode else (macd_bull_cross or macd_bull)
+        vwap_ok_long = above_vwap if not self._aggressive_mode else True
+        vol_ok_long = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
+
+        if htf_ok_long and rsi_pullback and above_ema and macd_ok_long and vwap_ok_long and vol_ok_long:
             return StrategySignal(symbol, "BUY", "long_rsi_macd_vwap_volume", features=features)
 
         # Short entry (optional)
         if self._enable_shorts:
             rsi_rebound = float(last["rsi"]) >= float(self._rsi_rebound_min_short)
-            if htf_ok_short and rsi_rebound and below_ema and macd_bear_cross and below_vwap and volume_confirm:
+            macd_ok_short = macd_bear_cross if not self._aggressive_mode else (macd_bear_cross or macd_bear)
+            vwap_ok_short = below_vwap if not self._aggressive_mode else True
+            vol_ok_short = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
+
+            if htf_ok_short and rsi_rebound and below_ema and macd_ok_short and vwap_ok_short and vol_ok_short:
                 return StrategySignal(symbol, "SHORT", "short_rsi_macd_vwap_volume", features=features)
 
         # HOLD reason (keep it informative)

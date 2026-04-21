@@ -541,6 +541,7 @@ def run(
         enable_shorts=settings.enable_shorts,
         htf_rsi_max_short=settings.htf_rsi_max_short,
         rsi_rebound_min_short=settings.rsi_rebound_min_short,
+        aggressive_mode=settings.aggressive_mode,
     )
 
     if build_universe:

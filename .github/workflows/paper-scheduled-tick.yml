@@ -106,6 +106,7 @@ jobs:
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           UNIVERSE_ENABLED: "true"
           ENABLE_SHORTS: "true"
+          AGGRESSIVE_MODE: "true"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Upload state artifact (debug / backup)
@@ -115,3 +116,11 @@ jobs:
           name: alpaca-state-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
           path: state/
           if-no-files-found: ignore
+
+      - name: Upload reports artifact (daily/weekly)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-reports-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn
