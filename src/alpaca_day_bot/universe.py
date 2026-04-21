@@ -45,70 +45,71 @@ def build_liquid_universe(
     - Persist list to JSON for use by scheduled ticks
     """
     from alpaca.data.enums import DataFeed
-    from alpaca.data.historical import StockHistoricalDataClient
-    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.historical import ScreenerClient, StockHistoricalDataClient
+    from alpaca.data.requests import MarketMoversRequest, MostActivesRequest, StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
-    from alpaca.trading.client import TradingClient
 
     t0 = datetime.now(tz=timezone.utc)
     lookback = max(5, int(lookback_days))
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=lookback * 2)  # calendar padding for weekends/holidays
 
-    # 1) Assets list (slow-ish but 1 call)
-    #
-    # NOTE: Alpaca's paper trading base URL has been observed to return an empty asset list
-    # for some accounts; assets are a global catalog and safe to read from the live base.
-    tc = TradingClient(apca_api_key_id, apca_api_secret_key, paper=False)
-    assets = tc.get_all_assets()
-    symbols: list[str] = []
-    for a in assets:
-        try:
-            if not getattr(a, "tradable", False):
-                continue
-            if str(getattr(a, "asset_class", "")).lower() != "us_equity":
-                continue
-            sym = str(getattr(a, "symbol", "")).strip().upper()
-            if not sym:
-                continue
-            # Skip weird/obviously non-standard symbols
-            if len(sym) > 5 and "." not in sym:
-                # allow BRK.B style but skip extremely long identifiers
-                continue
-            symbols.append(sym)
-        except Exception:
-            continue
+    # 1) Candidate symbols via Alpaca Screener endpoints (does NOT require /v2/assets)
+    sc = ScreenerClient(apca_api_key_id, apca_api_secret_key)
+    candidates: list[str] = []
+    rejects = {"no_candidates": 0, "no_bars": 0, "low_price": 0, "low_dollar_vol": 0}
 
-    symbols = sorted(set(symbols))
+    top_n = max(50, min(int(max_symbols) * 3, 1000))
+    try:
+        ma = sc.get_most_actives(MostActivesRequest(top=top_n))
+        for row in getattr(ma, "most_actives", []) or []:
+            s = str(getattr(row, "symbol", "")).strip().upper()
+            if s:
+                candidates.append(s)
+    except Exception as e:
+        log.warning("universe most_actives failed err=%s", e)
+
+    try:
+        mv = sc.get_market_movers(MarketMoversRequest(top=min(200, top_n)))
+        for row in (getattr(mv, "gainers", []) or []) + (getattr(mv, "losers", []) or []):
+            s = str(getattr(row, "symbol", "")).strip().upper()
+            if s:
+                candidates.append(s)
+    except Exception as e:
+        log.warning("universe movers failed err=%s", e)
+
+    symbols = sorted(set(candidates))
     total_assets_seen = len(symbols)
     if not symbols:
-        # Never hard-fail CI ticks: write an empty universe so the bot can fall back to SYMBOLS.
+        rejects["no_candidates"] = 1
         payload = {
             "generated_at_utc": t0.isoformat(),
             "lookback_days": int(lookback),
             "max_symbols": int(max_symbols),
             "min_price": float(min_price),
             "min_avg_dollar_vol": float(min_avg_dollar_vol),
-            "total_assets_seen": 0,
+            "total_assets_seen": int(total_assets_seen),
             "bars_symbols": 0,
-            "rejected_counts": {"no_assets": 1},
+            "rejected_counts": rejects,
             "symbols": [],
-            "notes": ["No assets returned from trading API; falling back to configured SYMBOLS."],
+            "notes": [
+                "Screener returned no candidates; falling back to configured SYMBOLS.",
+                "If this persists, your market-data entitlements may not include screener endpoints.",
+            ],
         }
         _write_json(Path(out_path), payload)
         return UniverseBuildResult(
             asof_utc=t0.isoformat(),
             lookback_days=int(lookback),
-            total_assets_seen=0,
+            total_assets_seen=int(total_assets_seen),
             bars_symbols=0,
             selected=[],
-            rejected_counts={"no_assets": 1},
+            rejected_counts=rejects,
         )
 
     # 2) Daily bars in batches
     data_client = StockHistoricalDataClient(apca_api_key_id, apca_api_secret_key)
     scored: list[tuple[str, float, float]] = []  # (sym, avg_dollar_vol, last_close)
-    rejects = {"no_bars": 0, "low_price": 0, "low_dollar_vol": 0}
 
     def chunks(xs: list[str], n: int):
         for i in range(0, len(xs), n):
