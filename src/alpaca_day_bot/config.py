@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # IEX (free) bars are delayed vs real time; requesting `end=now` often returns SIP / permission errors.
     rest_bar_end_lag_minutes: float = Field(default=18.0, alias="REST_BAR_END_LAG_MINUTES")
 
+    # Market-wide universe (free + efficient): build a liquid universe daily and trade/scan that.
+    universe_enabled: bool = Field(default=False, alias="UNIVERSE_ENABLED")
+    universe_max_symbols: int = Field(default=750, alias="UNIVERSE_MAX_SYMBOLS")
+    universe_lookback_days: int = Field(default=20, alias="UNIVERSE_LOOKBACK_DAYS")
+    universe_min_price: float = Field(default=2.0, alias="UNIVERSE_MIN_PRICE")
+    universe_min_avg_dollar_vol: float = Field(default=20_000_000.0, alias="UNIVERSE_MIN_AVG_DOLLAR_VOL")
+
     # Run modes
     observe_only: bool = Field(default=False, alias="OBSERVE_ONLY")
 

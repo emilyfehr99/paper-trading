@@ -76,6 +76,8 @@ Optional repo **Variables**: `GHA_MARKET_TRADE_START`, `GHA_MARKET_TRADE_END` (`
 
 Each run performs one REST bar warmup, one signal scan, and at most one round of order logic, then exits. The `state/` folder (SQLite ledger + lock) is cached **per New York calendar day** so daily trade counts and cooldowns survive between runs.
 
+If you enable the **market-wide scanner**, each tick first builds a **daily liquid universe** (all tradable US equities → ranked by average daily dollar volume from daily bars) and then scans that list intraday. This is the only practical way to “cover the whole market” for day-trading signals without trying to pull 1m bars for thousands of illiquid names.
+
 1. Push this repo to GitHub.
 2. **Settings → Secrets and variables → Actions**: add **`APCA_API_KEY_ID`** and **`APCA_API_SECRET_KEY`** (paper keys).
 3. Enable Actions on the repo if prompted. Use **Actions → Paper scheduled tick → Run workflow** to test manually.

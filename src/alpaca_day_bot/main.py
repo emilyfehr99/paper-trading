@@ -34,6 +34,7 @@ from alpaca_day_bot.backtest import (
     label_trade_regime,
     symbol_daytrade_recommendations,
 )
+from alpaca_day_bot.universe import build_liquid_universe, load_universe_symbols
 
 
 log = logging.getLogger("alpaca_day_bot")
@@ -83,9 +84,28 @@ def _try_acquire_single_instance_lock(state_dir: Path) -> object | None:
     return fp
 
 
-def _ordered_symbols(settings) -> list[str]:
-    """Put `focus_symbols` from robustness JSON first (same universe as SYMBOLS)."""
+def _base_symbols(settings) -> list[str]:
+    """
+    Universe selection.
+    - Default: SYMBOLS from config.
+    - If UNIVERSE_ENABLED=true: load `state/universe_latest.json` if present, else fall back to SYMBOLS.
+    """
     base = list(settings.symbols)
+    if not getattr(settings, "universe_enabled", False):
+        return base
+    try:
+        p = Path(settings.state_dir) / "universe_latest.json"
+        u = load_universe_symbols(str(p))
+        if u:
+            return u
+    except Exception:
+        pass
+    return base
+
+
+def _ordered_symbols(settings) -> list[str]:
+    """Put `focus_symbols` from robustness JSON first (same universe as base universe)."""
+    base = _base_symbols(settings)
     path_s = settings.recommendations_json
     p = Path(path_s) if path_s else Path(settings.reports_dir) / "day_trade_recommendations_latest.json"
     if not p.is_file():
@@ -376,6 +396,11 @@ def cli() -> None:
         action="store_true",
         help="Single trading pass then exit (for GitHub Actions / cron). Uses REST bar warmup; skips if bot.lock is held.",
     )
+    p.add_argument(
+        "--build-universe",
+        action="store_true",
+        help="Build a daily liquid universe (writes state/universe_latest.json) and exit.",
+    )
     args = p.parse_args()
     run(
         observe_only_override=bool(args.observe_only),
@@ -383,6 +408,7 @@ def cli() -> None:
         scheduled_tick=bool(args.scheduled_tick),
         backtest=bool(args.backtest),
         robustness=bool(args.robustness),
+        build_universe=bool(args.build_universe),
         start=args.start,
         end=args.end,
     )
@@ -395,6 +421,7 @@ def run(
     scheduled_tick: bool = False,
     backtest: bool,
     robustness: bool,
+    build_universe: bool = False,
     start: str | None,
     end: str | None,
 ) -> None:
@@ -425,6 +452,16 @@ def run(
             os.environ[k] = ""
 
     settings = load_settings()
+
+    # Universe override (optional): use a persisted liquid universe list instead of static SYMBOLS.
+    if getattr(settings, "universe_enabled", False):
+        try:
+            up = Path(settings.state_dir) / "universe_latest.json"
+            u = load_universe_symbols(str(up))
+            if u:
+                settings.symbols = u  # type: ignore[assignment]
+        except Exception:
+            pass
 
     # CLI flag wins.
     observe_only = bool(settings.observe_only) or observe_only_override
@@ -486,6 +523,32 @@ def run(
         htf_rsi_min=settings.htf_rsi_min,
         atr_regime_max_mult=settings.atr_regime_max_mult,
     )
+
+    if build_universe:
+        outp = str(Path(settings.state_dir) / "universe_latest.json")
+        res = build_liquid_universe(
+            apca_api_key_id=settings.apca_api_key_id,
+            apca_api_secret_key=settings.apca_api_secret_key,
+            out_path=outp,
+            max_symbols=int(settings.universe_max_symbols),
+            lookback_days=int(settings.universe_lookback_days),
+            min_price=float(settings.universe_min_price),
+            min_avg_dollar_vol=float(settings.universe_min_avg_dollar_vol),
+        )
+        log.info(
+            "universe_built",
+            extra={
+                "extra_json": {
+                    "out_path": outp,
+                    "selected": len(res.selected),
+                    "total_assets_seen": res.total_assets_seen,
+                    "bars_symbols": res.bars_symbols,
+                    "rejected_counts": res.rejected_counts,
+                }
+            },
+        )
+        ledger.close()
+        return
 
     if backtest or robustness:
         _run_backtest(settings, start=start, end=end, robustness=robustness)
