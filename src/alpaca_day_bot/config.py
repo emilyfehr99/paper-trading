@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     # Live diagnostics: periodic log of closest-to-BUY symbols (see signal_scan in logs).
     signal_scan_interval_s: float = Field(default=60.0, alias="SIGNAL_SCAN_INTERVAL_S")
 
-    # News: alpaca (default) | alphavantage | both — see https://www.alphavantage.co/documentation/
+    # News: alpaca (default) | alphavantage | google_rss | tickertick | both | combo
     news_provider: str = Field(default="alpaca", alias="NEWS_PROVIDER")
     alphavantage_api_key: str | None = Field(default=None, alias="ALPHAVANTAGE_API_KEY")
 

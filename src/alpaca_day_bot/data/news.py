@@ -13,6 +13,7 @@ log = logging.getLogger("alpaca_day_bot.news")
 
 _ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
 _GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+_TICKERTICK_FEED = "https://api.tickertick.com/feed"
 
 
 def _normalize_gate_mode(mode: str) -> str:
@@ -183,9 +184,62 @@ def fetch_alphavantage_news(*, api_key: str, symbol: str, limit: int) -> dict[st
 
 def _normalize_news_provider(raw: str) -> str:
     p = (raw or "alpaca").strip().lower()
-    if p not in ("alpaca", "alphavantage", "google_rss", "both"):
+    # "both" kept for backwards compat; "combo" merges all sources we can reach.
+    if p not in ("alpaca", "alphavantage", "google_rss", "tickertick", "both", "combo"):
         return "alpaca"
     return p
+
+
+def fetch_tickertick_news(*, symbol: str, limit: int) -> dict[str, Any]:
+    """
+    No-key stock news feed: TickerTick (https://api.tickertick.com/feed).
+    """
+    sym = (symbol or "").strip().lower()
+    lim = max(1, min(int(limit), 50))
+    if not sym:
+        return {"ok": False, "error": "empty_symbol", "provider": "tickertick", "count": 0, "articles": []}
+
+    # Query language: tt:<ticker>
+    params = urllib.parse.urlencode({"q": f"tt:{sym}", "n": str(lim)})
+    url = f"{_TICKERTICK_FEED}?{params}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "alpaca-paper-day-bot/0.1"})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        return {"ok": False, "error": str(e), "provider": "tickertick", "symbol": sym.upper(), "count": 0, "articles": []}
+
+    stories = data.get("stories") if isinstance(data, dict) else None
+    if not isinstance(stories, list):
+        return {"ok": False, "error": "no_stories", "provider": "tickertick", "symbol": sym.upper(), "count": 0, "articles": []}
+
+    arts: list[dict[str, Any]] = []
+    for st in stories[:lim]:
+        if not isinstance(st, dict):
+            continue
+        title = (st.get("title") or "").strip()
+        if not title:
+            continue
+        # time is ms since epoch
+        created_at = None
+        try:
+            tms = st.get("time")
+            if isinstance(tms, (int, float)):
+                created_at = datetime.fromtimestamp(float(tms) / 1000.0, tz=timezone.utc).isoformat()
+        except Exception:
+            created_at = None
+
+        arts.append(
+            {
+                "headline": title[:240],
+                "source": st.get("site"),
+                "created_at": created_at,
+                "url": ((st.get("url") or "")[:500] or None),
+                "id": st.get("id"),
+            }
+        )
+
+    return {"ok": True, "provider": "tickertick", "symbol": sym.upper(), "count": len(arts), "articles": arts}
 
 
 def fetch_google_news_rss(*, symbol: str, limit: int) -> dict[str, Any]:
@@ -256,6 +310,9 @@ def fetch_news_for_symbol(
     if prov == "google_rss":
         return fetch_google_news_rss(symbol=sym, limit=lim_cap)
 
+    if prov == "tickertick":
+        return fetch_tickertick_news(symbol=sym, limit=lim_cap)
+
     merged: list[dict[str, Any]] = []
     any_ok = False
 
@@ -266,13 +323,13 @@ def fetch_news_for_symbol(
         lookback_hours=lookback_hours,
         limit=lim_cap,
     )
-    if b_alp.get("ok"):
+    if b_alp.get("ok") and prov in ("both", "combo"):
         any_ok = True
         for a in b_alp.get("articles", []):
             merged.append({**a, "provider": "alpaca"})
 
     b_av = fetch_alphavantage_news(api_key=alphavantage_api_key or "", symbol=sym, limit=lim_cap)
-    if b_av.get("ok"):
+    if b_av.get("ok") and prov in ("both", "combo"):
         any_ok = True
         for a in b_av.get("articles", []):
             merged.append({**a, "provider": "alphavantage"})
@@ -283,14 +340,21 @@ def fetch_news_for_symbol(
         for a in b_rss.get("articles", []):
             merged.append({**a, "provider": "google_rss"})
 
+    b_tt = fetch_tickertick_news(symbol=sym, limit=min(20, lim_cap))
+    if b_tt.get("ok") and prov == "combo":
+        any_ok = True
+        for a in b_tt.get("articles", []):
+            merged.append({**a, "provider": "tickertick"})
+
     if not any_ok:
         err_a = b_alp.get("error")
         err_v = b_av.get("error")
         err_r = b_rss.get("error")
+        err_t = b_tt.get("error") if prov == "combo" else None
         return {
             "ok": False,
-            "error": f"alpaca={err_a}; alphavantage={err_v}; google_rss={err_r}",
-            "provider": "both",
+            "error": f"alpaca={err_a}; alphavantage={err_v}; google_rss={err_r}; tickertick={err_t}",
+            "provider": prov,
             "symbol": sym,
             "count": 0,
             "articles": [],
@@ -308,7 +372,7 @@ def fetch_news_for_symbol(
 
     return {
         "ok": True,
-        "provider": "both",
+        "provider": prov,
         "symbol": sym,
         "count": len(deduped),
         "articles": deduped[: min(len(deduped), lim_cap * 2)],
