@@ -56,7 +56,10 @@ def build_liquid_universe(
     start = end - timedelta(days=lookback * 2)  # calendar padding for weekends/holidays
 
     # 1) Assets list (slow-ish but 1 call)
-    tc = TradingClient(apca_api_key_id, apca_api_secret_key, paper=True)
+    #
+    # NOTE: Alpaca's paper trading base URL has been observed to return an empty asset list
+    # for some accounts; assets are a global catalog and safe to read from the live base.
+    tc = TradingClient(apca_api_key_id, apca_api_secret_key, paper=False)
     assets = tc.get_all_assets()
     symbols: list[str] = []
     for a in assets:
@@ -79,7 +82,28 @@ def build_liquid_universe(
     symbols = sorted(set(symbols))
     total_assets_seen = len(symbols)
     if not symbols:
-        raise RuntimeError("No tradable US equity assets returned.")
+        # Never hard-fail CI ticks: write an empty universe so the bot can fall back to SYMBOLS.
+        payload = {
+            "generated_at_utc": t0.isoformat(),
+            "lookback_days": int(lookback),
+            "max_symbols": int(max_symbols),
+            "min_price": float(min_price),
+            "min_avg_dollar_vol": float(min_avg_dollar_vol),
+            "total_assets_seen": 0,
+            "bars_symbols": 0,
+            "rejected_counts": {"no_assets": 1},
+            "symbols": [],
+            "notes": ["No assets returned from trading API; falling back to configured SYMBOLS."],
+        }
+        _write_json(Path(out_path), payload)
+        return UniverseBuildResult(
+            asof_utc=t0.isoformat(),
+            lookback_days=int(lookback),
+            total_assets_seen=0,
+            bars_symbols=0,
+            selected=[],
+            rejected_counts={"no_assets": 1},
+        )
 
     # 2) Daily bars in batches
     data_client = StockHistoricalDataClient(apca_api_key_id, apca_api_secret_key)
