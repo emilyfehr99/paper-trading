@@ -520,7 +520,7 @@ def run(
     tc = make_trading_client(settings)
     executor = OrderExecutor(tc)
 
-    buffer = BarBuffer(maxlen=512)
+    buffer = BarBuffer(maxlen=int(settings.bar_buffer_maxlen))
     md = MarketDataStreamer(settings, buffer)
     tu = TradingUpdatesStreamer(settings, on_update=on_trade_update)
 
