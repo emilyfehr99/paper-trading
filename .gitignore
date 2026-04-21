@@ -9,3 +9,7 @@ reports/
 dist/
 build/
 
+# Local debug runs (never commit)
+tmp_run_state*/
+tmp_pnl_state*/
+

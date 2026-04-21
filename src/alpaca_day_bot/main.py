@@ -14,6 +14,7 @@ import pandas as pd
 
 from alpaca_day_bot.config import load_settings
 from alpaca_day_bot.data.news import fetch_news_for_symbol, news_bundle_should_block
+from alpaca_day_bot.data.taapi import fetch_taapi_indicators_for_stock
 from alpaca_day_bot.data.stream import BarBuffer, MarketDataStreamer
 from alpaca_day_bot.logging_utils import setup_json_logging
 from alpaca_day_bot.reporting.report import write_daily_report, write_weekly_report
@@ -284,6 +285,48 @@ def _run_in_window_trading_cycle(
 
         if df_1m is None or getattr(df_1m, "empty", True):
             continue
+
+        # Optional TAAPI confirmation layer (stocks RSI/MACD).
+        # We only call TAAPI when we already have a trade candidate, to keep API calls low.
+        if (
+            (settings.indicator_provider or "").strip().lower() == "taapi"
+            and bool(settings.taapi_confirm_on_trade)
+            and (settings.taapi_secret or "").strip()
+        ):
+            ti = fetch_taapi_indicators_for_stock(secret=settings.taapi_secret or "", symbol=sym)
+            feat["taapi"] = {
+                "rsi_1m": ti.rsi_1m,
+                "rsi_15m": ti.rsi_15m,
+                "macd_1m": ti.macd_1m,
+                "macd_signal_1m": ti.macd_signal_1m,
+            }
+            if action == "BUY":
+                if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
+                    action = "HOLD"
+                    reason = "taapi_missing"
+                else:
+                    ok = (
+                        ti.rsi_1m <= float(settings.rsi_pullback_max)
+                        and ti.rsi_15m >= float(settings.htf_rsi_min)
+                        and ti.macd_1m >= ti.macd_signal_1m
+                    )
+                    if not ok:
+                        action = "HOLD"
+                        reason = "taapi_block"
+            else:
+                # SHORT: require 15m RSI bearish bias + 1m MACD bearish + 1m RSI rebound.
+                if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
+                    action = "HOLD"
+                    reason = "taapi_missing"
+                else:
+                    ok = (
+                        ti.rsi_15m <= float(settings.htf_rsi_max_short)
+                        and ti.rsi_1m >= float(settings.rsi_rebound_min_short)
+                        and ti.macd_1m <= ti.macd_signal_1m
+                    )
+                    if not ok:
+                        action = "HOLD"
+                        reason = "taapi_block"
         last_close = float(df_1m["close"].iloc[-1])
         last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
         stop_dist = max(0.01, last_range * settings.stop_loss_atr_mult)
