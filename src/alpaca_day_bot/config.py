@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     universe_max_symbols: int = Field(default=750, alias="UNIVERSE_MAX_SYMBOLS")
     universe_lookback_days: int = Field(default=20, alias="UNIVERSE_LOOKBACK_DAYS")
     universe_min_price: float = Field(default=2.0, alias="UNIVERSE_MIN_PRICE")
+    universe_max_price: float = Field(default=20.0, alias="UNIVERSE_MAX_PRICE")
     universe_min_avg_dollar_vol: float = Field(default=20_000_000.0, alias="UNIVERSE_MIN_AVG_DOLLAR_VOL")
 
     # Run modes
@@ -164,6 +165,9 @@ class Settings(BaseSettings):
 
     # Model exit controls
     model_exit_min_hold_minutes: float = Field(default=5.0, alias="MODEL_EXIT_MIN_HOLD_MINUTES")
+
+    # Synthetic exits: submit entry without bracket, then attach OCO TP/SL as separate orders.
+    synthetic_exits_enabled: bool = Field(default=False, alias="SYNTHETIC_EXITS_ENABLED")
 
     def tzinfo(self) -> ZoneInfo:
         return ZoneInfo(self.market_tz)

@@ -142,6 +142,53 @@ class OrderExecutor:
             oid = None
         return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
 
+    def submit_entry_buy_market(self, *, symbol: str, qty: float) -> ExecutionResult:
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
+        client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
+        req = MarketOrderRequest(
+            symbol=symbol,
+            qty=int(qty),
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._tc.submit_order(order_data=req)
+        except Exception as e:
+            return ExecutionResult(False, f"submit_error:{e}", client_order_id=client_order_id, alpaca_order_id=None)
+        oid = None
+        try:
+            oid = str(getattr(order, "id", None)) if order is not None else None
+        except Exception:
+            oid = None
+        return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
+    def submit_entry_buy_limit(self, *, symbol: str, qty: float, limit_price: float) -> ExecutionResult:
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
+        if limit_price <= 0:
+            return ExecutionResult(False, "bad_prices")
+        client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
+        req = LimitOrderRequest(
+            symbol=symbol,
+            qty=int(qty),
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            limit_price=round(float(limit_price), 2),
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._tc.submit_order(order_data=req)
+        except Exception as e:
+            return ExecutionResult(False, f"submit_error:{e}", client_order_id=client_order_id, alpaca_order_id=None)
+        oid = None
+        try:
+            oid = str(getattr(order, "id", None)) if order is not None else None
+        except Exception:
+            oid = None
+        return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
     def submit_bracket_buy_limit(
         self,
         *,
@@ -226,6 +273,57 @@ class OrderExecutor:
             oid = None
         return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
 
+    def submit_entry_short_market(self, *, symbol: str, qty: float) -> ExecutionResult:
+        if not self.is_shortable(symbol):
+            return ExecutionResult(False, "not_shortable")
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
+        client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
+        req = MarketOrderRequest(
+            symbol=symbol,
+            qty=int(qty),
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._tc.submit_order(order_data=req)
+        except Exception as e:
+            return ExecutionResult(False, f"submit_error:{e}", client_order_id=client_order_id, alpaca_order_id=None)
+        oid = None
+        try:
+            oid = str(getattr(order, "id", None)) if order is not None else None
+        except Exception:
+            oid = None
+        return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
+    def submit_entry_short_limit(self, *, symbol: str, qty: float, limit_price: float) -> ExecutionResult:
+        if not self.is_shortable(symbol):
+            return ExecutionResult(False, "not_shortable")
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
+        if limit_price <= 0:
+            return ExecutionResult(False, "bad_prices")
+        client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
+        req = LimitOrderRequest(
+            symbol=symbol,
+            qty=int(qty),
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            limit_price=round(float(limit_price), 2),
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._tc.submit_order(order_data=req)
+        except Exception as e:
+            return ExecutionResult(False, f"submit_error:{e}", client_order_id=client_order_id, alpaca_order_id=None)
+        oid = None
+        try:
+            oid = str(getattr(order, "id", None)) if order is not None else None
+        except Exception:
+            oid = None
+        return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
     def submit_bracket_short_limit(
         self,
         *,
@@ -253,6 +351,50 @@ class OrderExecutor:
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.BRACKET,
             limit_price=round(float(limit_price), 2),
+            take_profit=TakeProfitRequest(limit_price=round(float(take_profit_price), 2)),
+            stop_loss=StopLossRequest(stop_price=round(float(stop_price), 2)),
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._tc.submit_order(order_data=req)
+        except Exception as e:
+            return ExecutionResult(False, f"submit_error:{e}", client_order_id=client_order_id, alpaca_order_id=None)
+        oid = None
+        try:
+            oid = str(getattr(order, "id", None)) if order is not None else None
+        except Exception:
+            oid = None
+        return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
+    def submit_exit_oco(
+        self,
+        *,
+        symbol: str,
+        qty: float,
+        side: str,
+        take_profit_price: float,
+        stop_price: float,
+    ) -> ExecutionResult:
+        """
+        Synthetic exits using Alpaca OCO: submit TP+SL as an OCO pair.
+        side: the exit side (\"sell\" for long exits, \"buy\" for short exits)
+        """
+        if qty <= 0:
+            return ExecutionResult(False, "bad_qty")
+        sym = (symbol or "").strip().upper()
+        side_u = (side or "").strip().lower()
+        if side_u not in ("buy", "sell"):
+            return ExecutionResult(False, "bad_side")
+        if take_profit_price <= 0 or stop_price <= 0:
+            return ExecutionResult(False, "bad_exit_prices")
+
+        client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
+        req = MarketOrderRequest(
+            symbol=sym,
+            qty=int(qty),
+            side=(OrderSide.BUY if side_u == "buy" else OrderSide.SELL),
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.OCO,
             take_profit=TakeProfitRequest(limit_price=round(float(take_profit_price), 2)),
             stop_loss=StopLossRequest(stop_price=round(float(stop_price), 2)),
             client_order_id=client_order_id,

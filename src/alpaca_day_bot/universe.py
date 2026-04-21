@@ -34,6 +34,7 @@ def build_liquid_universe(
     max_symbols: int,
     lookback_days: int,
     min_price: float,
+    max_price: float | None = None,
     min_avg_dollar_vol: float,
     batch_size: int = 200,
 ) -> UniverseBuildResult:
@@ -57,7 +58,7 @@ def build_liquid_universe(
     # 1) Candidate symbols via Alpaca Screener endpoints (does NOT require /v2/assets)
     sc = ScreenerClient(apca_api_key_id, apca_api_secret_key)
     candidates: list[str] = []
-    rejects = {"no_candidates": 0, "no_bars": 0, "low_price": 0, "low_dollar_vol": 0}
+    rejects = {"no_candidates": 0, "no_bars": 0, "low_price": 0, "high_price": 0, "low_dollar_vol": 0}
 
     # Screener API caps:
     # - most-actives: top <= 100
@@ -156,6 +157,9 @@ def build_liquid_universe(
                 if last_close < float(min_price):
                     rejects["low_price"] += 1
                     continue
+                if max_price is not None and float(max_price) > 0 and last_close > float(max_price):
+                    rejects["high_price"] += 1
+                    continue
                 dv = (sdf["close"].astype(float) * sdf["volume"].astype(float)).dropna()
                 if dv.empty:
                     rejects["no_bars"] += 1
@@ -176,6 +180,7 @@ def build_liquid_universe(
         "lookback_days": int(lookback),
         "max_symbols": int(max_symbols),
         "min_price": float(min_price),
+        "max_price": (None if (max_price is None) else float(max_price)),
         "min_avg_dollar_vol": float(min_avg_dollar_vol),
         "total_assets_seen": int(total_assets_seen),
         "bars_symbols": int(bars_symbols),
@@ -209,4 +214,54 @@ def load_universe_symbols(path: str) -> list[str]:
         return [s for s in out if s]
     except Exception:
         return []
+
+
+def filter_universe_symbols_by_max_price(
+    *,
+    symbols: list[str],
+    max_price: float,
+    apca_api_key_id: str,
+    apca_api_secret_key: str,
+) -> list[str]:
+    """
+    Defensive filter in case a universe file was built with a different max_price.
+    Uses daily IEX bars (cheap) to drop symbols whose last close is above max_price.
+    """
+    if not symbols:
+        return []
+    if max_price <= 0:
+        return list(symbols)
+    from alpaca.data.enums import DataFeed
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+
+    data_client = StockHistoricalDataClient(apca_api_key_id, apca_api_secret_key)
+    end = datetime.now(tz=timezone.utc) - timedelta(days=1)
+    start = end - timedelta(days=14)
+    req = StockBarsRequest(
+        symbol_or_symbols=list(symbols),
+        timeframe=TimeFrame.Day,
+        start=start,
+        end=end,
+        feed=DataFeed.IEX,
+    )
+    try:
+        bars = data_client.get_stock_bars(req)
+        df = bars.df
+    except Exception:
+        return list(symbols)
+    if df is None or getattr(df, "empty", True) or not isinstance(df.index, pd.MultiIndex):
+        return list(symbols)
+
+    out = []
+    for sym in symbols:
+        try:
+            sdf = df.xs(sym, level=0).sort_index()
+            last_close = float(sdf["close"].iloc[-1])
+            if last_close <= float(max_price):
+                out.append(sym)
+        except Exception:
+            continue
+    return out
 

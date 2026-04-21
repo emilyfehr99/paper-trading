@@ -36,7 +36,11 @@ from alpaca_day_bot.backtest import (
     label_trade_regime,
     symbol_daytrade_recommendations,
 )
-from alpaca_day_bot.universe import build_liquid_universe, load_universe_symbols
+from alpaca_day_bot.universe import (
+    build_liquid_universe,
+    filter_universe_symbols_by_max_price,
+    load_universe_symbols,
+)
 
 
 log = logging.getLogger("alpaca_day_bot")
@@ -99,6 +103,18 @@ def _base_symbols(settings) -> list[str]:
         p = Path(settings.state_dir) / "universe_latest.json"
         u = load_universe_symbols(str(p))
         if u:
+            # Defensive: ensure universe remains compatible with whole-share sizing under $ cap.
+            try:
+                mp = float(getattr(settings, "universe_max_price", 0.0) or 0.0)
+                if mp > 0:
+                    u = filter_universe_symbols_by_max_price(
+                        symbols=u,
+                        max_price=mp,
+                        apca_api_key_id=settings.apca_api_key_id,
+                        apca_api_secret_key=settings.apca_api_secret_key,
+                    )
+            except Exception:
+                pass
             return u
     except Exception:
         pass
@@ -514,6 +530,25 @@ def _run_in_window_trading_cycle(
 
         qty_int = int(float(rd.qty))
         if qty_int <= 0:
+            # Most commonly: MAX_NOTIONAL_PER_TRADE_USD cap + whole-share requirement.
+            ledger.record_order_intent(
+                ts=t0,
+                symbol=sym,
+                side=("buy" if action == "BUY" else "sell"),
+                notional_usd=float(rd.notional_usd or 0.0),
+                stop_price=stop_price,
+                take_profit_price=tp_price,
+                client_order_id=None,
+                alpaca_order_id=None,
+                submitted=False,
+                reason="cap_qty_zero",
+                extra={
+                    "qty": qty_int,
+                    "action": action,
+                    "price": float(last_close),
+                    "max_notional_per_trade_usd": float(getattr(settings, "max_notional_per_trade_usd", 0.0) or 0.0),
+                },
+            )
             return
 
         if observe_only:
@@ -531,34 +566,58 @@ def _run_in_window_trading_cycle(
                 limit_price = last_close * (1.0 + k)
             limit_price = max(0.01, float(limit_price))
 
-        if action == "BUY":
-            if entry_type == "limit":
-                res = executor.submit_bracket_buy_limit(
-                    symbol=sym,
-                    qty=qty_int,
-                    limit_price=float(limit_price or last_close),
-                    stop_price=stop_price,
-                    take_profit_price=tp_price,
-                )
+        synthetic = bool(getattr(settings, "synthetic_exits_enabled", False))
+        exit_side = None
+        if synthetic:
+            # Entry first, then OCO exits.
+            if action == "BUY":
+                if entry_type == "limit":
+                    res = executor.submit_entry_buy_limit(
+                        symbol=sym, qty=qty_int, limit_price=float(limit_price or last_close)
+                    )
+                else:
+                    res = executor.submit_entry_buy_market(symbol=sym, qty=qty_int)
+                side = "buy"
+                exit_side = "sell"
             else:
-                res = executor.submit_bracket_buy(
-                    symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price
-                )
-            side = "buy"
+                if entry_type == "limit":
+                    res = executor.submit_entry_short_limit(
+                        symbol=sym, qty=qty_int, limit_price=float(limit_price or last_close)
+                    )
+                else:
+                    res = executor.submit_entry_short_market(symbol=sym, qty=qty_int)
+                side = "sell"
+                exit_side = "buy"
         else:
-            if entry_type == "limit":
-                res = executor.submit_bracket_short_limit(
-                    symbol=sym,
-                    qty=qty_int,
-                    limit_price=float(limit_price or last_close),
-                    stop_price=stop_price,
-                    take_profit_price=tp_price,
-                )
+            # Native bracket exits.
+            if action == "BUY":
+                if entry_type == "limit":
+                    res = executor.submit_bracket_buy_limit(
+                        symbol=sym,
+                        qty=qty_int,
+                        limit_price=float(limit_price or last_close),
+                        stop_price=stop_price,
+                        take_profit_price=tp_price,
+                    )
+                else:
+                    res = executor.submit_bracket_buy(
+                        symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price
+                    )
+                side = "buy"
             else:
-                res = executor.submit_bracket_short(
-                    symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price
-                )
-            side = "sell"
+                if entry_type == "limit":
+                    res = executor.submit_bracket_short_limit(
+                        symbol=sym,
+                        qty=qty_int,
+                        limit_price=float(limit_price or last_close),
+                        stop_price=stop_price,
+                        take_profit_price=tp_price,
+                    )
+                else:
+                    res = executor.submit_bracket_short(
+                        symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price
+                    )
+                side = "sell"
 
         # Dynamic hold target (based on technical volatility + model confidence)
         target_hold = None
@@ -609,6 +668,28 @@ def _run_in_window_trading_cycle(
             equity = executor.get_account_equity()
             gross = executor.gross_exposure_usd()
             open_positions = executor.open_positions_count()
+
+            if synthetic and exit_side is not None:
+                xres = executor.submit_exit_oco(
+                    symbol=sym,
+                    qty=qty_int,
+                    side=exit_side,
+                    take_profit_price=tp_price,
+                    stop_price=stop_price,
+                )
+                ledger.record_order_intent(
+                    ts=t0,
+                    symbol=sym,
+                    side="oco_exit",
+                    notional_usd=0.0,
+                    stop_price=stop_price,
+                    take_profit_price=tp_price,
+                    client_order_id=xres.client_order_id,
+                    alpaca_order_id=xres.alpaca_order_id,
+                    submitted=xres.submitted,
+                    reason=f"synthetic_exit:{xres.reason}",
+                    extra={"action": "EXIT_OCO", "qty": qty_int, "exit_side": exit_side},
+                )
 
     ml_bundle = None
     if bool(getattr(settings, "model_enabled", False)):
@@ -955,6 +1036,7 @@ def run(
             max_symbols=int(settings.universe_max_symbols),
             lookback_days=int(settings.universe_lookback_days),
             min_price=float(settings.universe_min_price),
+            max_price=float(getattr(settings, "universe_max_price", 0.0) or 0.0),
             min_avg_dollar_vol=float(settings.universe_min_avg_dollar_vol),
         )
         log.info(
