@@ -59,7 +59,10 @@ def build_liquid_universe(
     candidates: list[str] = []
     rejects = {"no_candidates": 0, "no_bars": 0, "low_price": 0, "low_dollar_vol": 0}
 
-    top_n = max(50, min(int(max_symbols) * 3, 1000))
+    # Screener API caps:
+    # - most-actives: top <= 100
+    # - movers: top <= 50
+    top_n = max(50, min(int(max_symbols) * 3, 100))
     try:
         ma = sc.get_most_actives(MostActivesRequest(top=top_n))
         for row in getattr(ma, "most_actives", []) or []:
@@ -70,7 +73,7 @@ def build_liquid_universe(
         log.warning("universe most_actives failed err=%s", e)
 
     try:
-        mv = sc.get_market_movers(MarketMoversRequest(top=min(200, top_n)))
+        mv = sc.get_market_movers(MarketMoversRequest(top=min(50, top_n)))
         for row in (getattr(mv, "gainers", []) or []) + (getattr(mv, "losers", []) or []):
             s = str(getattr(row, "symbol", "")).strip().upper()
             if s:
