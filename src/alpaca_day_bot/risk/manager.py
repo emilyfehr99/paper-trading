@@ -62,6 +62,8 @@ class RiskManager:
         self._last_trade_ts_by_symbol = dict(stats["last_by_symbol"])
 
     def daily_loss_breached(self, equity: float) -> bool:
+        if self._max_daily_loss_pct <= 0:
+            return False
         if self._start_equity is None:
             return False
         return equity <= self._start_equity * (1.0 - self._max_daily_loss_pct)
@@ -103,18 +105,20 @@ class RiskManager:
         if self.daily_profit_target_reached(equity):
             return RiskDecision(False, "daily_profit_target")
 
-        if self._trades_today >= self._max_trades_per_day:
+        if self._max_trades_per_day > 0 and self._trades_today >= self._max_trades_per_day:
             return RiskDecision(False, "max_trades_per_day")
 
-        if open_positions >= self._max_positions:
+        if self._max_positions > 0 and open_positions >= self._max_positions:
             return RiskDecision(False, "max_positions")
 
         if not self.can_trade_symbol(symbol, now_utc):
             return RiskDecision(False, "symbol_cooldown")
 
-        max_gross = equity * self._max_gross_exposure_pct
-        if gross_exposure_usd >= max_gross:
-            return RiskDecision(False, "max_gross_exposure")
+        max_gross = None
+        if self._max_gross_exposure_pct > 0:
+            max_gross = equity * self._max_gross_exposure_pct
+            if gross_exposure_usd >= max_gross:
+                return RiskDecision(False, "max_gross_exposure")
 
         # Position sizing by risk: risk_per_trade% of equity / stop_distance gives qty.
         risk_budget = equity * self._risk_per_trade_pct
@@ -123,12 +127,12 @@ class RiskManager:
         if price <= 0:
             return RiskDecision(False, "bad_price")
 
-        remaining = max(0.0, max_gross - gross_exposure_usd)
+        remaining = float("inf") if max_gross is None else max(0.0, max_gross - gross_exposure_usd)
         qty = risk_budget / stop_distance
         notional = qty * price
 
         # Cap notional to remaining gross; allow fractional sizing.
-        if notional > remaining and remaining > 0:
+        if remaining != float("inf") and notional > remaining and remaining > 0:
             qty = remaining / price
             notional = qty * price
 

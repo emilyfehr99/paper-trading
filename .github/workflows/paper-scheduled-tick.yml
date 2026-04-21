@@ -117,9 +117,11 @@ jobs:
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"
           # More aggressive risk + frequency (paper only)
-          MAX_POSITIONS: "10"
-          MAX_TRADES_PER_DAY: "60"
-          MAX_GROSS_EXPOSURE_PCT: "0.90"
+          # Set caps to "unlimited" for paper (0 disables in code); keep sizing via RISK_PER_TRADE_PCT.
+          MAX_POSITIONS: "0"
+          MAX_TRADES_PER_DAY: "0"
+          MAX_GROSS_EXPOSURE_PCT: "0"
+          MAX_DAILY_LOSS_PCT: "0"
           RISK_PER_TRADE_PCT: "0.01"
           PER_SYMBOL_COOLDOWN_S: "60"
           # Loosen HTF trend gates so more setups qualify
