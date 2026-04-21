@@ -298,7 +298,9 @@ def _run_in_window_trading_cycle(
         # can differ slightly from last_close on submission. Use a conservative buffer.
         # Use a larger buffer to avoid base_price rounding issues (base_price may differ from
         # the last bar close due to market order pricing / fractional cents in quotes).
-        min_tick_buffer = 0.25
+        # Use a buffer that scales with price to handle base_price drift.
+        # (e.g., for $75 stock => 0.5% = $0.375)
+        min_tick_buffer = max(0.25, abs(last_close) * 0.005)
         if action == "BUY":
             stop_price = min(stop_price, last_close - min_tick_buffer)
             tp_price = max(tp_price, last_close + min_tick_buffer)
