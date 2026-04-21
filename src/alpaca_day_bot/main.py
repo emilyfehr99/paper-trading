@@ -198,17 +198,28 @@ def _run_in_window_trading_cycle(
 
     # Smarter exits: time-based and optional model-based exits (in addition to brackets).
     # We base age on the latest submitted intent timestamp for that symbol from the ledger.
-    if float(getattr(settings, "max_hold_minutes", 0.0)) > 0:
+    if float(getattr(settings, "max_hold_minutes", 0.0)) > 0 or bool(getattr(settings, "dynamic_hold_enabled", True)):
         try:
             tz = settings.tzinfo()
-            stats = ledger.submitted_entry_stats_for_trading_date(market_day, tz)
-            last_by_symbol = stats.get("last_by_symbol") or {}
-            for sym, entry_ts in list(last_by_symbol.items()):
+            intents = ledger.last_submitted_entry_intents_for_trading_date(market_day, tz)
+            for sym, row in list(intents.items()):
                 try:
                     if not executor.has_position(sym):
                         continue
+                    entry_ts = row.get("ts")
+                    if entry_ts is None:
+                        continue
                     age_m = (t0 - entry_ts).total_seconds() / 60.0
-                    if age_m < float(settings.max_hold_minutes):
+                    target = float(getattr(settings, "max_hold_minutes", 0.0) or 0.0)
+                    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+                    if bool(getattr(settings, "dynamic_hold_enabled", True)):
+                        try:
+                            target = float(extra.get("target_hold_minutes") or 0.0) or target
+                        except Exception:
+                            pass
+                    if target <= 0:
+                        continue
+                    if age_m < target:
                         continue
                     res = executor.close_position_market(sym)
                     ledger.record_order_intent(
@@ -222,7 +233,7 @@ def _run_in_window_trading_cycle(
                         alpaca_order_id=None,
                         submitted=res.submitted,
                         reason=f"time_exit:{res.reason}",
-                        extra={"action": "EXIT_TIME", "age_minutes": age_m},
+                        extra={"action": "EXIT_TIME", "age_minutes": age_m, "target_hold_minutes": target},
                     )
                 except Exception:
                     continue
@@ -378,6 +389,30 @@ def _run_in_window_trading_cycle(
             res = executor.submit_bracket_short(symbol=sym, qty=qty_int, stop_price=stop_price, take_profit_price=tp_price)
             side = "sell"
 
+        # Dynamic hold target (based on technical volatility + model confidence)
+        target_hold = None
+        try:
+            if bool(getattr(settings, "dynamic_hold_enabled", True)):
+                atr = float(feat.get("atr") or 0.0)
+                atr_avg = float(feat.get("atr_avg") or 0.0)
+                atr_ratio = (atr / atr_avg) if atr_avg > 1e-9 else 1.0
+                model_p = None
+                if "model_proba" in feat:
+                    model_p = float(feat.get("model_proba"))
+                else:
+                    m = feat.get("model")
+                    if isinstance(m, dict) and m.get("proba") is not None:
+                        model_p = float(m.get("proba"))
+                base = float(getattr(settings, "base_hold_minutes", 45.0))
+                w_atr = float(getattr(settings, "hold_atr_ratio_weight", -15.0))
+                w_mp = float(getattr(settings, "hold_model_proba_weight", 20.0))
+                hold = base + w_atr * (atr_ratio - 1.0) + (w_mp * ((model_p or 0.5) - 0.5))
+                hold = max(float(getattr(settings, "min_hold_minutes", 10.0)), hold)
+                hold = min(float(getattr(settings, "max_hold_minutes_dynamic", 90.0)), hold)
+                target_hold = float(hold)
+        except Exception:
+            target_hold = None
+
         ledger.record_order_intent(
             ts=t0,
             symbol=sym,
@@ -389,7 +424,7 @@ def _run_in_window_trading_cycle(
             alpaca_order_id=res.alpaca_order_id,
             submitted=res.submitted,
             reason=res.reason,
-            extra={"qty": qty_int, "action": action},
+            extra={"qty": qty_int, "action": action, "target_hold_minutes": target_hold},
         )
         if res.submitted:
             risk.register_trade(sym, t0)

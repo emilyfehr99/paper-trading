@@ -229,6 +229,46 @@ class Ledger:
             last_by_symbol[str(sym)] = ts_p
         return {"count": len(rows), "last_by_symbol": last_by_symbol}
 
+    def last_submitted_entry_intents_for_trading_date(
+        self, market_day: date, tz: ZoneInfo
+    ) -> dict[str, dict[str, Any]]:
+        """
+        Return latest submitted entry intent per symbol for the day, including raw_json.
+        Used for dynamic hold-time targets and exit logic.
+        """
+        start = datetime.combine(market_day, time(0, 0, 0), tzinfo=tz).astimezone(timezone.utc)
+        end = start + timedelta(days=1)
+        start_s = start.isoformat()
+        end_s = end.isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+            SELECT ts, symbol, side, raw_json FROM order_intents
+            WHERE submitted = 1 AND LOWER(side) IN ('buy','sell') AND ts >= ? AND ts < ?
+            ORDER BY ts
+                """,
+                (start_s, end_s),
+            )
+            rows = cur.fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for ts_str, sym, side, raw in rows:
+            if not sym:
+                continue
+            try:
+                ts_p = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if ts_p.tzinfo is None:
+                ts_p = ts_p.replace(tzinfo=timezone.utc)
+            extra = {}
+            try:
+                j = json.loads(raw) if raw else {}
+                extra = (j.get("extra") or {}) if isinstance(j, dict) else {}
+            except Exception:
+                extra = {}
+            out[str(sym)] = {"ts": ts_p, "side": side, "extra": extra}
+        return out
+
     def record_signal(
         self,
         *,

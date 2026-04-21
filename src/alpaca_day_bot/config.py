@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     max_hold_minutes: float = Field(default=0.0, alias="MAX_HOLD_MINUTES")  # 0 disables time-exit
     model_exit_enabled: bool = Field(default=False, alias="MODEL_EXIT_ENABLED")
     model_exit_min_proba: float = Field(default=0.45, alias="MODEL_EXIT_MIN_PROBA")
+    dynamic_hold_enabled: bool = Field(default=True, alias="DYNAMIC_HOLD_ENABLED")
+    base_hold_minutes: float = Field(default=45.0, alias="BASE_HOLD_MINUTES")
+    min_hold_minutes: float = Field(default=10.0, alias="MIN_HOLD_MINUTES")
+    max_hold_minutes_dynamic: float = Field(default=90.0, alias="MAX_HOLD_MINUTES_DYNAMIC")
+    hold_atr_ratio_weight: float = Field(default=-15.0, alias="HOLD_ATR_RATIO_WEIGHT")
+    hold_model_proba_weight: float = Field(default=20.0, alias="HOLD_MODEL_PROBA_WEIGHT")
 
     # Shorts (paper): enable short entries and separate HTF gate.
     enable_shorts: bool = Field(default=False, alias="ENABLE_SHORTS")
