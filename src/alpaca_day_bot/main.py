@@ -279,7 +279,7 @@ def _run_in_window_trading_cycle(
             features=feat,
         )
 
-        if action != "BUY":
+        if action not in ("BUY", "SHORT"):
             continue
 
         if df_1m is None or getattr(df_1m, "empty", True):
@@ -287,8 +287,13 @@ def _run_in_window_trading_cycle(
         last_close = float(df_1m["close"].iloc[-1])
         last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
         stop_dist = max(0.01, last_range * settings.stop_loss_atr_mult)
-        stop_price = last_close - stop_dist
-        tp_price = last_close + stop_dist * settings.take_profit_r_mult
+        if action == "BUY":
+            stop_price = last_close - stop_dist
+            tp_price = last_close + stop_dist * settings.take_profit_r_mult
+        else:
+            # SHORT: stop above, take-profit below
+            stop_price = last_close + stop_dist
+            tp_price = last_close - stop_dist * settings.take_profit_r_mult
 
         rd = risk.decide_entry(
             symbol=sym,
@@ -323,16 +328,26 @@ def _run_in_window_trading_cycle(
             risk.register_trade(sym, t0)
             continue
 
-        res = executor.submit_bracket_buy(
-            symbol=sym,
-            notional_usd=rd.notional_usd,
-            stop_price=stop_price,
-            take_profit_price=tp_price,
-        )
+        if action == "BUY":
+            res = executor.submit_bracket_buy(
+                symbol=sym,
+                notional_usd=rd.notional_usd,
+                stop_price=stop_price,
+                take_profit_price=tp_price,
+            )
+            side = "buy"
+        else:
+            res = executor.submit_bracket_short(
+                symbol=sym,
+                notional_usd=rd.notional_usd,
+                stop_price=stop_price,
+                take_profit_price=tp_price,
+            )
+            side = "sell"
         ledger.record_order_intent(
             ts=t0,
             symbol=sym,
-            side="buy",
+            side=side,
             notional_usd=rd.notional_usd,
             stop_price=stop_price,
             take_profit_price=tp_price,
@@ -344,13 +359,14 @@ def _run_in_window_trading_cycle(
         if res.submitted:
             risk.register_trade(sym, t0)
             log.info(
-                f"order_submitted {sym} notional_usd={rd.notional_usd:.2f} "
+                f"order_submitted {sym} side={side} notional_usd={rd.notional_usd:.2f} "
                 f"stop={stop_price:.4f} tp={tp_price:.4f} "
                 f"client_order_id={res.client_order_id or '-'} "
                 f"alpaca_order_id={res.alpaca_order_id or '-'}",
                 extra={
                     "extra_json": {
                         "symbol": sym,
+                        "side": side,
                         "client_order_id": res.client_order_id,
                         "alpaca_order_id": res.alpaca_order_id,
                         "notional_usd": rd.notional_usd,
@@ -522,6 +538,9 @@ def run(
         volume_confirm_mult=settings.volume_confirm_mult,
         htf_rsi_min=settings.htf_rsi_min,
         atr_regime_max_mult=settings.atr_regime_max_mult,
+        enable_shorts=settings.enable_shorts,
+        htf_rsi_max_short=settings.htf_rsi_max_short,
+        rsi_rebound_min_short=settings.rsi_rebound_min_short,
     )
 
     if build_universe:

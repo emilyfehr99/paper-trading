@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     stop_loss_atr_mult: float = Field(default=1.5, alias="STOP_LOSS_ATR_MULT")
     take_profit_r_mult: float = Field(default=1.5, alias="TAKE_PROFIT_R_MULT")
 
+    # Shorts (paper): enable short entries and separate HTF gate.
+    enable_shorts: bool = Field(default=False, alias="ENABLE_SHORTS")
+    htf_rsi_max_short: float = Field(default=55.0, alias="HTF_RSI_MAX_SHORT")
+    rsi_rebound_min_short: float = Field(default=58.0, alias="RSI_REBOUND_MIN_SHORT")
+
     # Live diagnostics: periodic log of closest-to-BUY symbols (see signal_scan in logs).
     signal_scan_interval_s: float = Field(default=60.0, alias="SIGNAL_SCAN_INTERVAL_S")
 

@@ -56,7 +56,7 @@ class RiskManager:
 
     def rehydrate_from_ledger(self, ledger: Ledger, trading_date: date, tz: ZoneInfo) -> None:
         """Restore same-day trade count / cooldowns from SQLite (GitHub Actions ticks)."""
-        stats = ledger.submitted_buy_stats_for_trading_date(trading_date, tz)
+        stats = ledger.submitted_entry_stats_for_trading_date(trading_date, tz)
         self._trading_day = trading_date
         self._trades_today = int(stats["count"])
         self._last_trade_ts_by_symbol = dict(stats["last_by_symbol"])

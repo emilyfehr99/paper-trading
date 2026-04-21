@@ -8,7 +8,7 @@ from typing import Any
 @dataclass(frozen=True)
 class StrategySignal:
     symbol: str
-    action: str  # "BUY" or "HOLD"
+    action: str  # "BUY" | "SHORT" | "HOLD"
     reason: str
     features: dict[str, Any] | None = None
 

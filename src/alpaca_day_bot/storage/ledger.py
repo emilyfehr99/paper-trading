@@ -193,10 +193,10 @@ class Ledger:
         )
         self._conn.commit()
 
-    def submitted_buy_stats_for_trading_date(
+    def submitted_entry_stats_for_trading_date(
         self, market_day: date, tz: ZoneInfo
     ) -> dict[str, Any]:
-        """Submitted BUY intents on `market_day` in `tz` (for risk rehydration between CI runs)."""
+        """Submitted entry intents on `market_day` in `tz` (BUY or short SELL)."""
         start = datetime.combine(market_day, time(0, 0, 0), tzinfo=tz).astimezone(timezone.utc)
         end = start + timedelta(days=1)
         start_s = start.isoformat()
@@ -204,7 +204,7 @@ class Ledger:
         cur = self._conn.execute(
             """
             SELECT ts, symbol FROM order_intents
-            WHERE submitted = 1 AND LOWER(side) = 'buy' AND ts >= ? AND ts < ?
+            WHERE submitted = 1 AND LOWER(side) IN ('buy','sell') AND ts >= ? AND ts < ?
             ORDER BY ts
             """,
             (start_s, end_s),

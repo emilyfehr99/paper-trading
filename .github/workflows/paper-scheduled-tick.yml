@@ -105,6 +105,7 @@ jobs:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           UNIVERSE_ENABLED: "true"
+          ENABLE_SHORTS: "true"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Upload state artifact (debug / backup)

@@ -25,6 +25,9 @@ class V1RulesSignalEngine(BaseStrategy):
         volume_confirm_mult: float = 1.2,
         htf_rsi_len: int = 14,
         htf_rsi_min: float = 50.0,
+        htf_rsi_max_short: float = 55.0,
+        rsi_rebound_min_short: float = 58.0,
+        enable_shorts: bool = False,
         atr_len: int = 14,
         atr_regime_lookback: int = 50,
         atr_regime_max_mult: float = 2.0,
@@ -35,6 +38,9 @@ class V1RulesSignalEngine(BaseStrategy):
         self._volume_confirm_mult = volume_confirm_mult
         self._htf_rsi_len = htf_rsi_len
         self._htf_rsi_min = htf_rsi_min
+        self._htf_rsi_max_short = htf_rsi_max_short
+        self._rsi_rebound_min_short = rsi_rebound_min_short
+        self._enable_shorts = bool(enable_shorts)
         self._atr_len = atr_len
         self._atr_regime_lookback = atr_regime_lookback
         self._atr_regime_max_mult = atr_regime_max_mult
@@ -230,14 +236,17 @@ class V1RulesSignalEngine(BaseStrategy):
         if pd.isna(last.get("rsi")) or pd.isna(last.get("ema_20")) or pd.isna(last.get("vwap_calc")):
             return None
 
-        # Higher timeframe bias: 15m RSI must be > threshold
+        # Higher timeframe bias: 15m RSI must be > threshold (longs) or < max threshold (shorts)
         if df_15m is None or getattr(df_15m, "empty", True) or len(df_15m) < (self._htf_rsi_len + 2):
             return StrategySignal(symbol, "HOLD", "htf_not_ready")
         htf = df_15m.copy()
         htf["rsi"] = ta.rsi(htf["close"], length=int(self._htf_rsi_len))
         htf_last = htf.iloc[-1]
-        if pd.isna(htf_last.get("rsi")) or float(htf_last["rsi"]) < float(self._htf_rsi_min):
+        if pd.isna(htf_last.get("rsi")):
             return StrategySignal(symbol, "HOLD", "htf_bias_rsi")
+        htf_rsi_v = float(htf_last["rsi"])
+        htf_ok_long = htf_rsi_v >= float(self._htf_rsi_min)
+        htf_ok_short = htf_rsi_v <= float(self._htf_rsi_max_short)
 
         # Volatility regime guard: skip if ATR > k * average ATR
         atr = float(last.get("atr")) if not pd.isna(last.get("atr")) else None
@@ -250,6 +259,7 @@ class V1RulesSignalEngine(BaseStrategy):
         # Core entry conditions
         rsi_pullback = float(last["rsi"]) <= float(self._rsi_pullback_max)
         above_ema = float(last["close"]) > float(last["ema_20"])
+        below_ema = float(last["close"]) < float(last["ema_20"])
 
         # MACD cross: MACD line crosses above signal line on last bar
         macd_col = "MACD_12_26_9"
@@ -263,8 +273,10 @@ class V1RulesSignalEngine(BaseStrategy):
         if pd.isna(macd_now) or pd.isna(macds_now) or pd.isna(macd_prev) or pd.isna(macds_prev):
             return StrategySignal(symbol, "HOLD", "macd_not_ready")
         macd_bull_cross = (macd_now > macds_now) and (macd_prev <= macds_prev)
+        macd_bear_cross = (macd_now < macds_now) and (macd_prev >= macds_prev)
 
         above_vwap = float(last["close"]) > float(last["vwap_calc"])
+        below_vwap = float(last["close"]) < float(last["vwap_calc"])
         vol_sma = last.get("volume_sma")
         if pd.isna(vol_sma) or float(vol_sma) <= 0:
             return StrategySignal(symbol, "HOLD", "volume_not_ready")
@@ -283,18 +295,32 @@ class V1RulesSignalEngine(BaseStrategy):
             "htf_rsi": float(htf_last["rsi"]) if not pd.isna(htf_last.get("rsi")) else None,
             "atr": atr,
             "atr_avg": atr_avg,
+            "htf_ok_long": bool(htf_ok_long),
+            "htf_ok_short": bool(htf_ok_short),
         }
 
+        # Long entry
+        if htf_ok_long and rsi_pullback and above_ema and macd_bull_cross and above_vwap and volume_confirm:
+            return StrategySignal(symbol, "BUY", "long_rsi_macd_vwap_volume", features=features)
+
+        # Short entry (optional)
+        if self._enable_shorts:
+            rsi_rebound = float(last["rsi"]) >= float(self._rsi_rebound_min_short)
+            if htf_ok_short and rsi_rebound and below_ema and macd_bear_cross and below_vwap and volume_confirm:
+                return StrategySignal(symbol, "SHORT", "short_rsi_macd_vwap_volume", features=features)
+
+        # HOLD reason (keep it informative)
+        if not htf_ok_long and not (self._enable_shorts and htf_ok_short):
+            return StrategySignal(symbol, "HOLD", "htf_bias_rsi", features=features)
         if not rsi_pullback:
             return StrategySignal(symbol, "HOLD", "rsi_no_pullback", features=features)
-        if not above_ema:
-            return StrategySignal(symbol, "HOLD", "below_ema", features=features)
-        if not macd_bull_cross:
+        if not above_ema and not (self._enable_shorts and below_ema):
+            return StrategySignal(symbol, "HOLD", "ema_filter", features=features)
+        if not (macd_bull_cross or (self._enable_shorts and macd_bear_cross)):
             return StrategySignal(symbol, "HOLD", "macd_no_cross", features=features)
-        if not above_vwap:
-            return StrategySignal(symbol, "HOLD", "below_vwap", features=features)
+        if not (above_vwap or (self._enable_shorts and below_vwap)):
+            return StrategySignal(symbol, "HOLD", "vwap_filter", features=features)
         if not volume_confirm:
             return StrategySignal(symbol, "HOLD", "no_volume_confirm", features=features)
-
-        return StrategySignal(symbol, "BUY", "rsi_macd_vwap_volume", features=features)
+        return StrategySignal(symbol, "HOLD", "no_setup", features=features)
 

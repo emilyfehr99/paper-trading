@@ -5,12 +5,14 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 log = logging.getLogger("alpaca_day_bot.news")
 
 _ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
+_GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 
 
 def _normalize_gate_mode(mode: str) -> str:
@@ -181,9 +183,44 @@ def fetch_alphavantage_news(*, api_key: str, symbol: str, limit: int) -> dict[st
 
 def _normalize_news_provider(raw: str) -> str:
     p = (raw or "alpaca").strip().lower()
-    if p not in ("alpaca", "alphavantage", "both"):
+    if p not in ("alpaca", "alphavantage", "google_rss", "both"):
         return "alpaca"
     return p
+
+
+def fetch_google_news_rss(*, symbol: str, limit: int) -> dict[str, Any]:
+    """
+    No-key fallback: Google News RSS search for the ticker.
+    Returns headlines only (no sentiment).
+    """
+    sym = (symbol or "").strip().upper()
+    lim = max(1, min(int(limit), 20))
+    if not sym:
+        return {"ok": False, "error": "empty_symbol", "provider": "google_rss", "count": 0, "articles": []}
+
+    q = f"{sym} stock"
+    params = urllib.parse.urlencode({"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+    url = f"{_GOOGLE_NEWS_RSS}?{params}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "alpaca-paper-day-bot/0.1"})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            xml = resp.read().decode(errors="ignore")
+        root = ET.fromstring(xml)
+    except Exception as e:
+        return {"ok": False, "error": str(e), "provider": "google_rss", "symbol": sym, "count": 0, "articles": []}
+
+    # RSS: channel/item/title + pubDate
+    items = root.findall(".//item")
+    arts: list[dict[str, Any]] = []
+    for it in items[:lim]:
+        title = (it.findtext("title") or "").strip()
+        pub = (it.findtext("pubDate") or "").strip()
+        link = (it.findtext("link") or "").strip()
+        if not title:
+            continue
+        arts.append({"headline": title[:240], "source": "GoogleNewsRSS", "created_at": pub or None, "url": link or None})
+
+    return {"ok": True, "provider": "google_rss", "symbol": sym, "count": len(arts), "articles": arts}
 
 
 def fetch_news_for_symbol(
@@ -216,6 +253,9 @@ def fetch_news_for_symbol(
     if prov == "alphavantage":
         return fetch_alphavantage_news(api_key=alphavantage_api_key or "", symbol=sym, limit=lim_cap)
 
+    if prov == "google_rss":
+        return fetch_google_news_rss(symbol=sym, limit=lim_cap)
+
     merged: list[dict[str, Any]] = []
     any_ok = False
 
@@ -237,12 +277,19 @@ def fetch_news_for_symbol(
         for a in b_av.get("articles", []):
             merged.append({**a, "provider": "alphavantage"})
 
+    b_rss = fetch_google_news_rss(symbol=sym, limit=min(10, lim_cap))
+    if b_rss.get("ok"):
+        any_ok = True
+        for a in b_rss.get("articles", []):
+            merged.append({**a, "provider": "google_rss"})
+
     if not any_ok:
         err_a = b_alp.get("error")
         err_v = b_av.get("error")
+        err_r = b_rss.get("error")
         return {
             "ok": False,
-            "error": f"alpaca={err_a}; alphavantage={err_v}",
+            "error": f"alpaca={err_a}; alphavantage={err_v}; google_rss={err_r}",
             "provider": "both",
             "symbol": sym,
             "count": 0,
