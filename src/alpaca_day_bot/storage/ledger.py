@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -15,18 +16,22 @@ class Ledger:
     def __init__(self, db_path: str) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path))
+        # Trading updates arrive on a background thread; allow cross-thread use and serialize with a lock.
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA synchronous=NORMAL;")
         self._init_schema()
         self._ensure_audit_file()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def _init_schema(self) -> None:
-        self._conn.executescript(
-            """
+        with self._lock:
+            self._conn.executescript(
+                """
             CREATE TABLE IF NOT EXISTS trade_updates (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts TEXT NOT NULL,
@@ -80,8 +85,8 @@ class Ledger:
               FOREIGN KEY (signal_id) REFERENCES signals(id)
             );
             """
-        )
-        self._conn.commit()
+            )
+            self._conn.commit()
 
     def _ensure_audit_file(self) -> None:
         """Create transactions.jsonl on startup so `alpaca-watch-trades` can tail immediately."""
@@ -92,23 +97,24 @@ class Ledger:
 
     def record_trade_update(self, evt: TradeUpdateEvent) -> None:
         payload = json.dumps(asdict(evt), default=str)
-        self._conn.execute(
-            """
+        with self._lock:
+            self._conn.execute(
+                """
             INSERT INTO trade_updates (ts, event, symbol, order_id, client_order_id, filled_qty, filled_avg_price, raw_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                evt.ts.isoformat(),
-                evt.event,
-                evt.symbol,
-                evt.order_id,
-                evt.client_order_id,
-                evt.filled_qty,
-                evt.filled_avg_price,
-                payload,
-            ),
-        )
-        self._conn.commit()
+                """,
+                (
+                    evt.ts.isoformat(),
+                    evt.event,
+                    evt.symbol,
+                    evt.order_id,
+                    evt.client_order_id,
+                    evt.filled_qty,
+                    evt.filled_avg_price,
+                    payload,
+                ),
+            )
+            self._conn.commit()
         self.append_audit_line(
             {
                 "kind": "trade_update",
@@ -150,29 +156,30 @@ class Ledger:
             "extra": extra or {},
         }
         raw = json.dumps(row, default=str)
-        self._conn.execute(
-            """
+        with self._lock:
+            self._conn.execute(
+                """
             INSERT INTO order_intents (
               ts, symbol, side, notional_usd, stop_price, take_profit_price,
               client_order_id, alpaca_order_id, submitted, reason, raw_json
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                ts.isoformat(),
-                symbol,
-                side,
-                float(notional_usd),
-                float(stop_price),
-                float(take_profit_price),
-                client_order_id,
-                alpaca_order_id,
-                1 if submitted else 0,
-                reason,
-                raw,
-            ),
-        )
-        self._conn.commit()
+                """,
+                (
+                    ts.isoformat(),
+                    symbol,
+                    side,
+                    float(notional_usd),
+                    float(stop_price),
+                    float(take_profit_price),
+                    client_order_id,
+                    alpaca_order_id,
+                    1 if submitted else 0,
+                    reason,
+                    raw,
+                ),
+            )
+            self._conn.commit()
         self.append_audit_line({"kind": "order_intent", **row})
 
     def append_audit_line(self, obj: dict[str, Any]) -> None:
@@ -184,14 +191,15 @@ class Ledger:
             f.write(line)
 
     def record_equity_snapshot(self, ts: datetime, equity: float, gross_exposure: float) -> None:
-        self._conn.execute(
-            """
+        with self._lock:
+            self._conn.execute(
+                """
             INSERT INTO equity_snapshots (ts, equity, gross_exposure)
             VALUES (?, ?, ?)
-            """,
-            (ts.isoformat(), float(equity), float(gross_exposure)),
-        )
-        self._conn.commit()
+                """,
+                (ts.isoformat(), float(equity), float(gross_exposure)),
+            )
+            self._conn.commit()
 
     def submitted_entry_stats_for_trading_date(
         self, market_day: date, tz: ZoneInfo
@@ -201,15 +209,16 @@ class Ledger:
         end = start + timedelta(days=1)
         start_s = start.isoformat()
         end_s = end.isoformat()
-        cur = self._conn.execute(
-            """
+        with self._lock:
+            cur = self._conn.execute(
+                """
             SELECT ts, symbol FROM order_intents
             WHERE submitted = 1 AND LOWER(side) IN ('buy','sell') AND ts >= ? AND ts < ?
             ORDER BY ts
-            """,
-            (start_s, end_s),
-        )
-        rows = cur.fetchall()
+                """,
+                (start_s, end_s),
+            )
+            rows = cur.fetchall()
         last_by_symbol: dict[str, datetime] = {}
         for ts_str, sym in rows:
             if not sym:
@@ -229,21 +238,22 @@ class Ledger:
         reason: str,
         features: dict[str, Any] | None = None,
     ) -> int:
-        cur = self._conn.execute(
-            """
+        with self._lock:
+            cur = self._conn.execute(
+                """
             INSERT INTO signals (ts, symbol, action, reason, features_json)
             VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                ts.isoformat(),
-                symbol,
-                action,
-                reason,
-                (None if features is None else json.dumps(features, default=str)),
-            ),
-        )
-        self._conn.commit()
-        return int(cur.lastrowid)
+                """,
+                (
+                    ts.isoformat(),
+                    symbol,
+                    action,
+                    reason,
+                    (None if features is None else json.dumps(features, default=str)),
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
 
     def list_unlabeled_buy_signal_rows(
         self,
@@ -257,8 +267,9 @@ class Ledger:
         start = datetime.combine(market_day, time(0, 0, 0), tzinfo=tz).astimezone(timezone.utc)
         end = start + timedelta(days=1)
         start_s, end_s = start.isoformat(), end.isoformat()
-        cur = self._conn.execute(
-            """
+        with self._lock:
+            cur = self._conn.execute(
+                """
             SELECT s.id, s.ts, s.symbol, s.features_json
             FROM signals s
             LEFT JOIN forward_return_labels f ON f.signal_id = s.id
@@ -267,7 +278,7 @@ class Ledger:
               AND f.signal_id IS NULL
             """,
             (start_s, end_s),
-        )
+            )
         rows_out: list[tuple[int, str, str, str]] = []
         for sid, ts_s, sym, feat in cur.fetchall():
             if not feat:
@@ -294,20 +305,21 @@ class Ledger:
         return_pct: float,
         horizon_minutes: float,
     ) -> None:
-        self._conn.execute(
-            """
+        with self._lock:
+            self._conn.execute(
+                """
             INSERT OR REPLACE INTO forward_return_labels
               (signal_id, evaluated_ts, price_at_label, entry_close, return_pct, horizon_minutes)
             VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(signal_id),
-                evaluated_ts.isoformat(),
-                float(price_at_label),
-                float(entry_close),
-                float(return_pct),
-                float(horizon_minutes),
-            ),
-        )
-        self._conn.commit()
+                """,
+                (
+                    int(signal_id),
+                    evaluated_ts.isoformat(),
+                    float(price_at_label),
+                    float(entry_close),
+                    float(return_pct),
+                    float(horizon_minutes),
+                ),
+            )
+            self._conn.commit()
 
