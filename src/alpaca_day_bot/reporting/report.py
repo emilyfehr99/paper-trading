@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from alpaca_day_bot.reporting.accuracy import forward_accuracy_for_calendar_day
+from alpaca_day_bot.reporting.trades import realized_trade_stats_for_day
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,27 @@ def write_daily_report(
             "- No labeled BUY signals for this calendar day yet (needs a later tick after the min age).",
         ]
 
+    # Realized trade stats (from fills)
+    tstats = realized_trade_stats_for_day(db_path, start, end)
+    if tstats.trades > 0:
+        trade_lines = [
+            "",
+            "### Realized trade stats (from fills, FIFO lot matching)",
+            f"- **Trades (round trips)**: {tstats.trades}",
+            f"- **Win rate**: {('n/a' if tstats.win_rate is None else f'{tstats.win_rate*100:.1f}%')}",
+            f"- **Profit factor**: {('n/a' if tstats.profit_factor is None else f'{tstats.profit_factor:.2f}')}",
+            f"- **Expectancy ($/trade)**: {('n/a' if tstats.expectancy is None else f'{tstats.expectancy:.2f}')}",
+            f"- **Avg win**: {fmt_money(tstats.avg_win)}",
+            f"- **Avg loss**: {fmt_money(tstats.avg_loss)}",
+            f"- **Realized PnL (sum)**: {fmt_money(tstats.total_pnl)}",
+        ]
+    else:
+        trade_lines = [
+            "",
+            "### Realized trade stats (from fills)",
+            "- No completed round trips yet in this calendar day.",
+        ]
+
     lines = [
         f"## Paper trading report: {day.isoformat()}",
         "",
@@ -112,6 +134,7 @@ def write_daily_report(
         f"- **Sharpe (snapshot returns, approx.)**: {('n/a' if sharpe_intraday is None else f'{sharpe_intraday:.2f}')}",
         f"- **Trade updates (fills)**: {s.trades}",
         *acc_lines,
+        *trade_lines,
         "",
         "Notes:",
         "- Equity snapshots are taken periodically during runtime.",
