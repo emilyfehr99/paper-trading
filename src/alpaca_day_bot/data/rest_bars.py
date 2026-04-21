@@ -72,6 +72,7 @@ class RestBarPoller:
                 start=start,
                 end=end,
                 feed=DataFeed.IEX,
+                limit=10000,
             )
             bars = client.get_stock_bars(req)
             df = bars.df
