@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     indicator_provider: str = Field(default="local", alias="INDICATOR_PROVIDER")  # local | taapi
     taapi_secret: str | None = Field(default=None, alias="TAAPI_SECRET")
     taapi_confirm_on_trade: bool = Field(default=True, alias="TAAPI_CONFIRM_ON_TRADE")
+    # If TAAPI is rate-limited / forbidden, do not block trades (still record taapi in features).
+    taapi_fail_open: bool = Field(default=True, alias="TAAPI_FAIL_OPEN")
 
     # Exits (bracket-like)
     stop_loss_atr_mult: float = Field(default=1.5, alias="STOP_LOSS_ATR_MULT")

@@ -302,8 +302,9 @@ def _run_in_window_trading_cycle(
             }
             if action == "BUY":
                 if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
-                    action = "HOLD"
-                    reason = "taapi_missing"
+                    if not bool(getattr(settings, "taapi_fail_open", True)):
+                        action = "HOLD"
+                        reason = "taapi_missing"
                 else:
                     ok = (
                         ti.rsi_1m <= float(settings.rsi_pullback_max)
@@ -316,8 +317,9 @@ def _run_in_window_trading_cycle(
             else:
                 # SHORT: require 15m RSI bearish bias + 1m MACD bearish + 1m RSI rebound.
                 if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
-                    action = "HOLD"
-                    reason = "taapi_missing"
+                    if not bool(getattr(settings, "taapi_fail_open", True)):
+                        action = "HOLD"
+                        reason = "taapi_missing"
                 else:
                     ok = (
                         ti.rsi_15m <= float(settings.htf_rsi_max_short)

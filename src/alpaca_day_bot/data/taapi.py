@@ -10,6 +10,7 @@ from typing import Any
 log = logging.getLogger("alpaca_day_bot.taapi")
 
 _TAAPI_BASE = "https://api.taapi.io"
+_TAAPI_BULK = f"{_TAAPI_BASE}/bulk"
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,31 @@ def _get_json(url: str) -> dict[str, Any] | None:
         with urllib.request.urlopen(req, timeout=20) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        log.warning("taapi_get_failed err=%s url=%s", e, url)
+        # Never log the secret token (it is part of the URL in direct mode).
+        redacted = url
+        if "secret=" in redacted:
+            redacted = redacted.split("secret=", 1)[0] + "secret=<redacted>"
+        log.warning("taapi_get_failed err=%s url=%s", e, redacted)
+        return None
+
+
+def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "User-Agent": "alpaca-paper-day-bot/0.1",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning("taapi_post_failed err=%s endpoint=%s", e, url)
         return None
 
 
@@ -41,13 +66,54 @@ def fetch_taapi_indicators_for_stock(*, secret: str, symbol: str) -> TaapiIndica
     if not sym or not sec:
         return TaapiIndicators(None, None, None, None)
 
-    def url(endpoint: str, interval: str) -> str:
-        q = urllib.parse.urlencode({"secret": sec, "symbol": sym, "interval": interval, "type": "stocks"})
-        return f"{_TAAPI_BASE}/{endpoint}?{q}"
+    # Prefer bulk to reduce request count (and avoid 429s).
+    bulk_1m = _post_json(
+        _TAAPI_BULK,
+        {
+            "secret": sec,
+            "construct": {
+                "type": "stocks",
+                "symbol": sym,
+                "interval": "1m",
+                "indicators": [
+                    {"indicator": "rsi", "period": 14, "id": "rsi_1m"},
+                    {"indicator": "macd", "id": "macd_1m"},
+                ],
+            },
+        },
+    )
+    bulk_15m = _post_json(
+        _TAAPI_BULK,
+        {
+            "secret": sec,
+            "construct": {
+                "type": "stocks",
+                "symbol": sym,
+                "interval": "15m",
+                "indicators": [
+                    {"indicator": "rsi", "period": 14, "id": "rsi_15m"},
+                ],
+            },
+        },
+    )
 
-    rsi1 = _get_json(url("rsi", "1m"))
-    rsi15 = _get_json(url("rsi", "15m"))
-    macd1 = _get_json(url("macd", "1m"))
+    def _bulk_get(d: dict[str, Any] | None, id_: str) -> dict[str, Any] | None:
+        if not d or not isinstance(d, dict):
+            return None
+        data = d.get("data")
+        if not isinstance(data, list):
+            return None
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("id")) == id_:
+                res = row.get("result")
+                return res if isinstance(res, dict) else None
+        return None
+
+    rsi1 = _bulk_get(bulk_1m, "rsi_1m")
+    macd1 = _bulk_get(bulk_1m, "macd_1m")
+    rsi15 = _bulk_get(bulk_15m, "rsi_15m")
 
     def f(d: dict | None, k: str) -> float | None:
         if not d:
