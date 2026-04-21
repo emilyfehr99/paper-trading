@@ -48,6 +48,12 @@ def _flatten_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
         "htf_ok_short": 1.0 if bool(feat.get("htf_ok_short")) else 0.0,
         "is_buy": 1.0,
     }
+    try:
+        act = (feat.get("action") or feat.get("signal_action") or "").strip().upper()
+        if act in ("SHORT", "SELL"):
+            x["is_buy"] = 0.0
+    except Exception:
+        pass
 
     # Time-of-day context (if ts captured in features; else NaN)
     try:
@@ -82,19 +88,61 @@ def _flatten_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
         x["news_ok"] = 1.0 if bool(news.get("ok")) else 0.0
         x["news_count"] = float(len(arts))
         x["news_recency_min"] = float("nan")
+        x["news_sent_wmean"] = float("nan")
+        x["news_event_risk"] = 0.0
         sent = []
+        sent_w = []
         src_counts = {"alpaca": 0, "alphavantage": 0, "google_rss": 0, "tickertick": 0}
+        risk_words = (
+            "earnings",
+            "offering",
+            "secondary",
+            "sec ",
+            "investigation",
+            "lawsuit",
+            "downgrade",
+            "upgrade",
+            "guidance",
+            "merger",
+            "acquisition",
+            "halt",
+            "bankruptcy",
+        )
         for a in arts:
             prov = (a.get("provider") or "").strip().lower()
             if prov in src_counts:
                 src_counts[prov] += 1
+            txt = f"{a.get('headline') or ''} {a.get('summary') or ''}".strip().lower()
+            if txt and any(w in txt for w in risk_words):
+                x["news_event_risk"] = 1.0
             s = a.get("sentiment_score")
             if s is not None:
                 try:
-                    sent.append(float(s))
+                    sv = float(s)
+                    sent.append(sv)
+                    # weight by recency if possible
+                    w = 1.0
+                    created = a.get("created_at")
+                    if isinstance(created, str) and created:
+                        try:
+                            from datetime import datetime, timezone
+
+                            dtc = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                            if dtc.tzinfo is None:
+                                dtc = dtc.replace(tzinfo=timezone.utc)
+                            # use the signal timestamp if available (dt) else don't weight
+                            if "hour_utc" in x and isinstance(dt, datetime):
+                                age_min = max(0.0, (dt - dtc).total_seconds() / 60.0)
+                                w = 1.0 / (1.0 + (age_min / 60.0))
+                        except Exception:
+                            w = 1.0
+                    sent_w.append((sv, w))
                 except Exception:
                     pass
         x["news_sent_mean"] = float(sum(sent) / len(sent)) if sent else float("nan")
+        x["news_sent_wmean"] = (
+            float(sum(v * w for v, w in sent_w) / sum(w for _v, w in sent_w)) if sent_w else float("nan")
+        )
         x["news_sent_present"] = 1.0 if sent else 0.0
         x["news_src_alpaca"] = float(src_counts["alpaca"])
         x["news_src_alphavantage"] = float(src_counts["alphavantage"])
@@ -107,7 +155,9 @@ def _flatten_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
                 "news_count": 0.0,
                 "news_recency_min": float("nan"),
                 "news_sent_mean": float("nan"),
+                "news_sent_wmean": float("nan"),
                 "news_sent_present": 0.0,
+                "news_event_risk": 0.0,
                 "news_src_alpaca": 0.0,
                 "news_src_alphavantage": 0.0,
                 "news_src_google_rss": 0.0,

@@ -335,6 +335,51 @@ class Ledger:
             rows_out.append((int(sid), ts_s, str(sym), str(feat)))
         return rows_out
 
+    def list_unlabeled_signal_rows(
+        self,
+        *,
+        market_day: date,
+        tz: ZoneInfo,
+        now_utc: datetime,
+        min_age_minutes: float,
+        actions: tuple[str, ...] = ("BUY", "SHORT"),
+    ) -> list[tuple[int, str, str, str, str]]:
+        """
+        Returns (signal_id, ts_iso, symbol, action, features_json) for rows needing a label.
+        """
+        start = datetime.combine(market_day, time(0, 0, 0), tzinfo=tz).astimezone(timezone.utc)
+        end = start + timedelta(days=1)
+        start_s, end_s = start.isoformat(), end.isoformat()
+        actions_u = tuple(str(a).upper() for a in actions)
+        with self._lock:
+            cur = self._conn.execute(
+                """
+            SELECT s.id, s.ts, s.symbol, s.action, s.features_json
+            FROM signals s
+            LEFT JOIN forward_return_labels f ON f.signal_id = s.id
+            WHERE s.action IN ({acts})
+              AND s.ts >= ? AND s.ts < ?
+              AND f.signal_id IS NULL
+            """.format(acts=",".join(["?"] * len(actions_u))),
+                (*actions_u, start_s, end_s),
+            )
+            rows = cur.fetchall()
+        rows_out: list[tuple[int, str, str, str, str]] = []
+        for sid, ts_s, sym, act, feat in rows:
+            if not feat:
+                continue
+            try:
+                ts_p = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if ts_p.tzinfo is None:
+                ts_p = ts_p.replace(tzinfo=timezone.utc)
+            age_m = (now_utc - ts_p).total_seconds() / 60.0
+            if age_m < float(min_age_minutes):
+                continue
+            rows_out.append((int(sid), ts_s, str(sym), str(act), str(feat)))
+        return rows_out
+
     def record_forward_return_label(
         self,
         *,

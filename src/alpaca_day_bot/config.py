@@ -153,6 +153,18 @@ class Settings(BaseSettings):
     # BUY uses (1 - bps/10_000), SHORT uses (1 + bps/10_000). 0 = use last price.
     limit_entry_offset_bps: float = Field(default=0.0, alias="LIMIT_ENTRY_OFFSET_BPS")
 
+    # Accuracy guards / gating
+    # Avoid stacking highly correlated positions (0 disables).
+    max_corr_with_open_positions: float = Field(default=0.0, alias="MAX_CORR_WITH_OPEN_POSITIONS")
+    corr_lookback_bars_1m: int = Field(default=60, alias="CORR_LOOKBACK_BARS_1M")
+
+    # Model gating by regime (optional JSON mapping). Example:
+    # {"trend_low_vol":0.55,"chop_high_vol":0.70}
+    model_min_proba_by_regime_json: str = Field(default="", alias="MODEL_MIN_PROBA_BY_REGIME_JSON")
+
+    # Model exit controls
+    model_exit_min_hold_minutes: float = Field(default=5.0, alias="MODEL_EXIT_MIN_HOLD_MINUTES")
+
     def tzinfo(self) -> ZoneInfo:
         return ZoneInfo(self.market_tz)
 

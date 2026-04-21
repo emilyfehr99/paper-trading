@@ -126,7 +126,7 @@ def _ordered_symbols(settings) -> list[str]:
         return base
 
 
-def _label_buy_signals_forward_returns(
+def _label_signals_forward_returns(
     *,
     ledger: Ledger,
     buffer: BarBuffer,
@@ -136,13 +136,14 @@ def _label_buy_signals_forward_returns(
 ) -> None:
     if not settings.signal_accuracy_enabled:
         return
-    pending = ledger.list_unlabeled_buy_signal_rows(
+    pending = ledger.list_unlabeled_signal_rows(
         market_day=market_day,
         tz=settings.tzinfo(),
         now_utc=t0,
         min_age_minutes=float(settings.signal_accuracy_min_age_minutes),
+        actions=("BUY", "SHORT"),
     )
-    for signal_id, ts_s, sym, feat_json in pending:
+    for signal_id, ts_s, sym, action, feat_json in pending:
         df = _run_sync(buffer.snapshot_df(sym))
         if df is None or getattr(df, "empty", True):
             continue
@@ -164,7 +165,12 @@ def _label_buy_signals_forward_returns(
             ts_sig = ts_sig.replace(tzinfo=timezone.utc)
         horizon_m = (t0 - ts_sig).total_seconds() / 60.0
         now_px = float(df["close"].iloc[-1])
-        ret = (now_px - entry_f) / entry_f
+        act_u = (action or "").strip().upper()
+        if act_u == "SHORT":
+            # Positive label = price fell after signal (good for shorts)
+            ret = (entry_f - now_px) / entry_f
+        else:
+            ret = (now_px - entry_f) / entry_f
         ledger.record_forward_return_label(
             signal_id=signal_id,
             evaluated_ts=t0,
@@ -195,6 +201,43 @@ def _run_in_window_trading_cycle(
     equity = executor.get_account_equity()
     gross = executor.gross_exposure_usd()
     open_positions = executor.open_positions_count()
+
+    # Load ML bundle early so exits can use it too.
+    ml_bundle = None
+    if bool(getattr(settings, "model_enabled", False)):
+        ml_bundle = _load_ml_model(getattr(settings, "model_path", "state/models/latest.joblib"))
+
+    def _regime_label(*, df_1m, df_15m) -> str | None:
+        """
+        Lightweight regime label: {trend|chop}_{high_vol|low_vol} based on ADX(14) on 15m and ATR ratio on 1m.
+        """
+        try:
+            import pandas_ta as ta
+
+            if df_1m is None or getattr(df_1m, "empty", True) or df_15m is None or getattr(df_15m, "empty", True):
+                return None
+
+            atr = float(df_1m.get("atr").iloc[-1]) if "atr" in df_1m.columns else None
+            atr_avg = float(df_1m.get("atr_avg").iloc[-1]) if "atr_avg" in df_1m.columns else None
+            atr_ratio = (atr / atr_avg) if (atr is not None and atr_avg is not None and atr_avg > 1e-9) else None
+
+            h = df_15m.copy()
+            if "ADX_14" not in h.columns:
+                adx = ta.adx(h["high"], h["low"], h["close"], length=14)
+                if adx is not None:
+                    h = h.join(adx)
+            adx_v = None
+            if "ADX_14" in h.columns:
+                try:
+                    adx_v = float(h["ADX_14"].iloc[-1])
+                except Exception:
+                    adx_v = None
+
+            trend = "trend" if (adx_v is not None and adx_v >= 22.0) else "chop"
+            vol = "high_vol" if (atr_ratio is not None and atr_ratio >= 1.15) else "low_vol"
+            return f"{trend}_{vol}"
+        except Exception:
+            return None
 
     # Smarter exits: time-based and optional model-based exits (in addition to brackets).
     # We base age on the latest submitted intent timestamp for that symbol from the ledger.
@@ -234,6 +277,75 @@ def _run_in_window_trading_cycle(
                         submitted=res.submitted,
                         reason=f"time_exit:{res.reason}",
                         extra={"action": "EXIT_TIME", "age_minutes": age_m, "target_hold_minutes": target},
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # Model-based early exit: re-score open positions and close when confidence degrades.
+    if bool(getattr(settings, "model_exit_enabled", False)) and ml_bundle is not None:
+        try:
+            tz = settings.tzinfo()
+            intents = ledger.last_submitted_entry_intents_for_trading_date(market_day, tz)
+            min_hold = float(getattr(settings, "model_exit_min_hold_minutes", 5.0) or 0.0)
+            thr = float(getattr(settings, "model_exit_min_proba", 0.45) or 0.0)
+            for sym, row in list(intents.items()):
+                try:
+                    if not executor.has_position(sym):
+                        continue
+                    entry_ts = row.get("ts")
+                    if entry_ts is None:
+                        continue
+                    age_m = (t0 - entry_ts).total_seconds() / 60.0
+                    if age_m < min_hold:
+                        continue
+
+                    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+                    entry_action = extra.get("action")
+                    act = (
+                        (str(entry_action).upper() if entry_action else None)
+                        or ("BUY" if str(row.get("side")).lower() == "buy" else "SHORT")
+                    )
+
+                    df_1m = _run_sync(buffer.snapshot_df(sym))
+                    df_15m = _run_sync(buffer.snapshot_resampled_df(sym, "15min"))
+                    sig_now = strategy.decide(symbol=sym, df_1m=df_1m, df_15m=df_15m)
+                    if sig_now is None or not isinstance(sig_now.features, dict):
+                        continue
+                    feat_now = dict(sig_now.features)
+                    feat_now["reason"] = sig_now.reason
+                    feat_now["signal_ts"] = t0.isoformat()
+                    feat_now["action"] = act
+                    rlbl = _regime_label(df_1m=df_1m, df_15m=df_15m)
+                    if rlbl:
+                        feat_now["regime"] = rlbl
+
+                    md = _ml_predict_proba(ml_bundle, feat_now)
+                    if (not md.ok) or (md.proba is None):
+                        continue
+                    if float(md.proba) >= thr:
+                        continue
+
+                    res = executor.close_position_market(sym)
+                    ledger.record_order_intent(
+                        ts=t0,
+                        symbol=sym,
+                        side="close",
+                        notional_usd=0.0,
+                        stop_price=0.0,
+                        take_profit_price=0.0,
+                        client_order_id=None,
+                        alpaca_order_id=None,
+                        submitted=res.submitted,
+                        reason=f"model_exit:{res.reason}",
+                        extra={
+                            "action": "EXIT_MODEL",
+                            "age_minutes": age_m,
+                            "model_provider": md.provider,
+                            "model_proba": md.proba,
+                            "model_exit_min_proba": thr,
+                        },
                     )
                 except Exception:
                     continue
@@ -303,6 +415,32 @@ def _run_in_window_trading_cycle(
             return
         if executor.has_position(sym):
             return
+
+        # Correlation guard: avoid stacking highly correlated names (accuracy + drawdown stability).
+        max_corr = float(getattr(settings, "max_corr_with_open_positions", 0.0) or 0.0)
+        if max_corr > 0:
+            try:
+                lookback = max(20, int(getattr(settings, "corr_lookback_bars_1m", 60) or 60))
+                held = [h for h in executor.open_position_symbols() if h and h != sym]
+                if held:
+                    import numpy as np
+                    import pandas as pd
+
+                    s = df_1m["close"].astype(float).pct_change().dropna().tail(lookback)
+                    for hs in held[:10]:
+                        hdf = _run_sync(buffer.snapshot_df(hs))
+                        if hdf is None or getattr(hdf, "empty", True) or "close" not in hdf.columns:
+                            continue
+                        hret = hdf["close"].astype(float).pct_change().dropna().tail(lookback)
+                        # align by index
+                        joined = pd.concat([s, hret], axis=1, join="inner").dropna()
+                        if len(joined) < 15:
+                            continue
+                        c = float(np.corrcoef(joined.iloc[:, 0], joined.iloc[:, 1])[0, 1])
+                        if np.isfinite(c) and abs(c) >= max_corr:
+                            return
+            except Exception:
+                pass
 
         # Optional TAAPI confirmation layer (stocks RSI/MACD).
         if (
@@ -493,6 +631,13 @@ def _run_in_window_trading_cycle(
         # Add a couple fields so inference can use them as features.
         feat["reason"] = reason
         feat["signal_ts"] = t0.isoformat()
+        feat["action"] = action
+        try:
+            rlbl = _regime_label(df_1m=df_1m, df_15m=df_15m)
+            if rlbl:
+                feat["regime"] = rlbl
+        except Exception:
+            pass
 
         if sig.action == "BUY" and settings.news_fetch_enabled:
             bundle = fetch_news_for_symbol(
@@ -557,7 +702,7 @@ def _run_in_window_trading_cycle(
             submit_entry=_try_submit_entry,
         )
 
-    _label_buy_signals_forward_returns(
+    _label_signals_forward_returns(
         ledger=ledger,
         buffer=buffer,
         settings=settings,
@@ -590,8 +735,31 @@ def _apply_ml_filter_rank_and_trade(
     if not candidates:
         return
     min_p = float(getattr(settings, "model_min_proba", 0.55))
+    reg_map = {}
+    try:
+        s = (getattr(settings, "model_min_proba_by_regime_json", "") or "").strip()
+        if s:
+            reg_map = json.loads(s)
+    except Exception:
+        reg_map = {}
     top_n = max(1, int(getattr(settings, "top_n_per_tick", 2)))
-    keep = [c for c in candidates if float(c.get("model_proba", 0.0)) >= min_p]
+    keep = []
+    for c in candidates:
+        mp = float(c.get("model_proba", 0.0))
+        feat = c.get("features") or {}
+        rlbl = None
+        try:
+            rlbl = (feat.get("regime") if isinstance(feat, dict) else None) or None
+        except Exception:
+            rlbl = None
+        mp_req = min_p
+        try:
+            if rlbl and isinstance(reg_map, dict) and rlbl in reg_map:
+                mp_req = float(reg_map[rlbl])
+        except Exception:
+            mp_req = min_p
+        if mp >= mp_req:
+            keep.append(c)
     keep.sort(key=lambda c: (-float(c.get("model_proba", 0.0)), str(c.get("symbol", ""))))
     keep = keep[:top_n]
 

@@ -49,7 +49,9 @@ def _news_features(bundle: dict[str, Any] | None, *, now_ts: datetime) -> dict[s
             "news_count": 0.0,
             "news_recency_min": float("nan"),
             "news_sent_mean": float("nan"),
+            "news_sent_wmean": float("nan"),
             "news_sent_present": 0.0,
+            "news_event_risk": 0.0,
             "news_src_alpaca": 0.0,
             "news_src_alphavantage": 0.0,
             "news_src_google_rss": 0.0,
@@ -79,19 +81,49 @@ def _news_features(bundle: dict[str, Any] | None, *, now_ts: datetime) -> dict[s
     # Provider counts and sentiment
     src_counts = {"alpaca": 0, "alphavantage": 0, "google_rss": 0, "tickertick": 0}
     sent = []
+    sent_w = []
+    event_risk = 0.0
+    risk_words = (
+        "earnings",
+        "offering",
+        "secondary",
+        "sec ",
+        "investigation",
+        "lawsuit",
+        "downgrade",
+        "upgrade",
+        "guidance",
+        "merger",
+        "acquisition",
+        "halt",
+        "bankruptcy",
+    )
     for a in arts:
         if not isinstance(a, dict):
             continue
         prov = (a.get("provider") or "").strip().lower()
         if prov in src_counts:
             src_counts[prov] += 1
+        txt = f"{a.get('headline') or ''} {a.get('summary') or ''}".strip().lower()
+        if txt and any(w in txt for w in risk_words):
+            event_risk = 1.0
         s = a.get("sentiment_score")
         if s is not None:
             try:
-                sent.append(float(s))
+                sv = float(s)
+                sent.append(sv)
+                # Recency-weight (simple): fresher news gets higher weight.
+                w = 1.0
+                created = a.get("created_at")
+                dt = _parse_iso_dt(created) if isinstance(created, str) else None
+                if dt is not None:
+                    age_min = max(0.0, (now_ts - dt).total_seconds() / 60.0)
+                    w = 1.0 / (1.0 + (age_min / 60.0))
+                sent_w.append((sv, w))
             except Exception:
                 pass
     sent_mean = float(np.mean(sent)) if sent else float("nan")
+    sent_wmean = float(sum(v * w for v, w in sent_w) / sum(w for _v, w in sent_w)) if sent_w else float("nan")
     sent_present = 1.0 if sent else 0.0
 
     return {
@@ -99,7 +131,9 @@ def _news_features(bundle: dict[str, Any] | None, *, now_ts: datetime) -> dict[s
         "news_count": count,
         "news_recency_min": recency_min,
         "news_sent_mean": sent_mean,
+        "news_sent_wmean": sent_wmean,
         "news_sent_present": sent_present,
+        "news_event_risk": float(event_risk),
         "news_src_alpaca": float(src_counts["alpaca"]),
         "news_src_alphavantage": float(src_counts["alphavantage"]),
         "news_src_google_rss": float(src_counts["google_rss"]),

@@ -11,7 +11,7 @@ import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
 from sklearn.pipeline import Pipeline
 
 from alpaca_day_bot.ml.dataset import build_signal_label_dataset
@@ -34,8 +34,23 @@ def _safe_auc(y_true, y_score) -> float | None:
         return None
 
 
+def _precision_at_k(y_true, y_score, k_frac: float) -> float | None:
+    try:
+        n = len(y_true)
+        if n <= 0:
+            return None
+        k = max(1, int(n * float(k_frac)))
+        idx = np.argsort(-np.asarray(y_score))[:k]
+        yt = np.asarray(y_true)[idx]
+        return float(np.mean(yt))
+    except Exception:
+        return None
+
+
 def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 15.0) -> dict:
-    ds = build_signal_label_dataset(db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=("BUY",))
+    ds = build_signal_label_dataset(
+        db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=("BUY", "SHORT")
+    )
     X = ds.X
     y = ds.y
     meta = ds.meta
@@ -87,25 +102,53 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
     def eval_model(m):
         proba = m.predict_proba(X_test)[:, 1]
         pred = (proba >= 0.5).astype(int)
-        return TrainMetrics(
+        tm = TrainMetrics(
             n=int(len(y_test)),
             pos_rate=float(np.mean(y_test)),
             auc=_safe_auc(y_test, proba),
             acc=float(accuracy_score(y_test, pred)),
         )
+        cal = {}
+        try:
+            cal["brier"] = float(brier_score_loss(y_test, proba))
+            # 5 bucket calibration summary: avg p vs empirical hit-rate
+            bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.000001]
+            rows = []
+            for lo, hi in zip(bins[:-1], bins[1:]):
+                msk = (proba >= lo) & (proba < hi)
+                if int(np.sum(msk)) <= 0:
+                    continue
+                rows.append(
+                    {
+                        "bin": f"{lo:.1f}-{min(1.0, hi):.1f}",
+                        "n": int(np.sum(msk)),
+                        "p_mean": float(np.mean(proba[msk])),
+                        "hit_rate": float(np.mean(np.asarray(y_test)[msk])),
+                    }
+                )
+            cal["calibration_bins"] = rows
+        except Exception:
+            cal = {}
+        extra = {
+            "precision_at_10pct": _precision_at_k(y_test, proba, 0.10),
+            "precision_at_20pct": _precision_at_k(y_test, proba, 0.20),
+            "precision_at_30pct": _precision_at_k(y_test, proba, 0.30),
+            **cal,
+        }
+        return tm, extra, proba
 
-    m_log = eval_model(cal)
-    best = ("logreg", cal, m_log)
+    m_log, extra_log, proba_log = eval_model(cal)
+    best = ("logreg", cal, m_log, extra_log, proba_log)
     if lgbm_cal is not None:
-        m_lgb = eval_model(lgbm_cal)
+        m_lgb, extra_lgb, proba_lgb = eval_model(lgbm_cal)
         # choose by AUC when available, otherwise accuracy
         def score(m: TrainMetrics) -> float:
             return (m.auc if m.auc is not None else m.acc)
 
         if score(m_lgb) >= score(m_log):
-            best = ("lgbm", lgbm_cal, m_lgb)
+            best = ("lgbm", lgbm_cal, m_lgb, extra_lgb, proba_lgb)
 
-    provider, model, metrics = best
+    provider, model, metrics, extra_metrics, proba_best = best
     outp = Path(out_path)
     outp.parent.mkdir(parents=True, exist_ok=True)
 
@@ -113,7 +156,6 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
     best_thr = 0.55
     best_acc = -1.0
     try:
-        proba_best = model.predict_proba(X_test)[:, 1]
         for thr in (0.50, 0.55, 0.60, 0.65, 0.70):
             pred = (proba_best >= thr).astype(int)
             acc_thr = float(accuracy_score(y_test, pred))
@@ -162,6 +204,7 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
         "min_horizon_minutes": float(min_horizon_minutes),
         "provider": provider,
         "metrics": asdict(metrics),
+        "extra_metrics": extra_metrics,
         "recommended_min_proba": best_thr,
         "feature_columns": list(X.columns),
         "rows_seen": int(len(meta)),

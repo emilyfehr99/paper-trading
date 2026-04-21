@@ -24,7 +24,9 @@ def quick_walk_forward_eval(*, db_path: str, min_horizon_minutes: float = 15.0) 
     Lightweight walk-forward on the labeled signals dataset (not bar backtests).
     Uses logistic regression (fast) to provide an early signal about model viability.
     """
-    ds = build_signal_label_dataset(db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=("BUY",))
+    ds = build_signal_label_dataset(
+        db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=("BUY", "SHORT")
+    )
     X, y, meta = ds.X, ds.y, ds.meta
     if len(X) < 100:
         return [WalkForwardFold(train_n=int(len(X)), test_n=0, test_acc=None)]

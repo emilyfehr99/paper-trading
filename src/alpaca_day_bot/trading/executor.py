@@ -82,6 +82,17 @@ class OrderExecutor:
     def open_positions_count(self) -> int:
         return len(self._tc.get_all_positions())
 
+    def open_position_symbols(self) -> list[str]:
+        out: list[str] = []
+        try:
+            for p in self._tc.get_all_positions():
+                sym = str(getattr(p, "symbol", "") or "").strip().upper()
+                if sym:
+                    out.append(sym)
+        except Exception:
+            return []
+        return out
+
     def has_position(self, symbol: str) -> bool:
         try:
             _ = self._tc.get_open_position(symbol)
