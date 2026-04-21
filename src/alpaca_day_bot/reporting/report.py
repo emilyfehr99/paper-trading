@@ -8,6 +8,7 @@ from pathlib import Path
 from alpaca_day_bot.reporting.accuracy import forward_accuracy_for_calendar_day
 from alpaca_day_bot.reporting.model_diagnostics import model_diagnostics_for_day
 from alpaca_day_bot.reporting.trades import realized_trade_stats_for_day
+from alpaca_day_bot.reporting.trade_why import trade_whys_for_day
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,9 @@ def write_daily_report(
         *model_lines,
         *trade_lines,
         "",
+        "### Trades (why this fired)",
+        *(_trade_why_lines(db_path, day)),
+        "",
         "Notes:",
         "- Equity snapshots are taken periodically during runtime.",
         "- Weekly summaries are written separately as `week_ending_YYYY-MM-DD.md`.",
@@ -161,6 +165,23 @@ def write_daily_report(
     ]
     out.write_text("\n".join(lines), encoding="utf-8")
     return str(out)
+
+
+def _trade_why_lines(db_path: str, day: date) -> list[str]:
+    rows = trade_whys_for_day(db_path, day.isoformat())
+    if not rows:
+        return ["- No submitted orders recorded for this calendar day."]
+    out: list[str] = []
+    for r in rows:
+        qty = "n/a" if r.qty is None else str(int(r.qty))
+        mp = "n/a" if r.model_proba is None else f"{r.model_proba:.3f}"
+        nn = "n/a" if r.news_count is None else str(r.news_count)
+        tp = "n/a" if r.taapi_present is None else str(r.taapi_present).lower()
+        out.append(
+            f"- **{r.symbol}** {str(r.side).upper()} qty={qty} "
+            f"setup={r.setup_reason or 'n/a'} model_p={mp} news_n={nn} taapi={tp}"
+        )
+    return out
 
 
 def write_weekly_report(db_path: str, reports_dir: str, week_ending: date, days: int = 7) -> str:

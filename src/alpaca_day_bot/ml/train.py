@@ -123,6 +123,39 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
     except Exception:
         pass
 
+    # Save simple explainability artifacts
+    feature_importance = None
+    try:
+        if provider == "lgbm":
+            # CalibratedClassifierCV -> base_estimator pipeline in cv estimators; use the first fitted one.
+            est0 = getattr(model, "calibrated_classifiers_", [None])[0]
+            base = getattr(est0, "estimator", None)
+            clf = None
+            if base is not None and hasattr(base, "named_steps"):
+                clf = base.named_steps.get("clf")
+            if clf is not None and hasattr(clf, "feature_importances_"):
+                fi = list(getattr(clf, "feature_importances_"))
+                feature_importance = sorted(
+                    [{"feature": c, "importance": float(v)} for c, v in zip(list(X.columns), fi)],
+                    key=lambda r: -r["importance"],
+                )[:30]
+        else:
+            # LogisticRegression coefficients (approx; calibrated wrapper)
+            est0 = getattr(model, "calibrated_classifiers_", [None])[0]
+            base = getattr(est0, "estimator", None)
+            clf = None
+            if base is not None and hasattr(base, "named_steps"):
+                clf = base.named_steps.get("clf")
+            if clf is not None and hasattr(clf, "coef_"):
+                coefs = list(clf.coef_[0])
+                pairs = [{"feature": c, "coef": float(v)} for c, v in zip(list(X.columns), coefs)]
+                feature_importance = {
+                    "top_positive": sorted(pairs, key=lambda r: -r["coef"])[:15],
+                    "top_negative": sorted(pairs, key=lambda r: r["coef"])[:15],
+                }
+    except Exception:
+        feature_importance = None
+
     payload = {
         "trained_at": datetime.now(tz=timezone.utc).isoformat(),
         "db_path": db_path,
@@ -132,6 +165,7 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
         "recommended_min_proba": best_thr,
         "feature_columns": list(X.columns),
         "rows_seen": int(len(meta)),
+        "explainability": feature_importance,
     }
     joblib.dump({"model": model, "meta": payload}, outp)
     (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
