@@ -56,7 +56,21 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
     meta = ds.meta
 
     if len(X) < 50:
-        raise SystemExit(f"Not enough labeled rows to train (n={len(X)}).")
+        # In early deployment we may have 0–few labeled rows. Treat this as a
+        # successful no-op so scheduled training doesn't fail the workflow.
+        outp = Path(out_path)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+            "db_path": db_path,
+            "min_horizon_minutes": float(min_horizon_minutes),
+            "skipped": True,
+            "skip_reason": "not_enough_labeled_rows",
+            "n_labeled": int(len(X)),
+            "min_required": 50,
+        }
+        (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
 
     # Chronological split (reduce leakage): last 25% as test, with a small embargo to reduce overlap.
     n = len(X)
