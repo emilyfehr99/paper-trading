@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 from alpaca.trading.requests import (
-    ClosePositionRequest,
     LimitOrderRequest,
     MarketOrderRequest,
     StopLossRequest,
@@ -437,7 +436,8 @@ class OrderExecutor:
         if not sym:
             return ExecutionResult(False, "empty_symbol")
         try:
-            _ = self._tc.close_position(sym, close_options=ClosePositionRequest())  # full position
+            # Full close: do not pass ClosePositionRequest unless specifying qty/percentage.
+            _ = self._tc.close_position(sym)
             return ExecutionResult(True, "close_submitted", client_order_id=None, alpaca_order_id=None)
         except Exception as e:
             return ExecutionResult(False, f"close_error:{e}", client_order_id=None, alpaca_order_id=None)
