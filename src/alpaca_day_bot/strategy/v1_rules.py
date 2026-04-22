@@ -319,6 +319,18 @@ class V1RulesSignalEngine(BaseStrategy):
             if htf_ok_long and rsi_momo_long and above_ema and macd_bull and vol_ok_long:
                 return StrategySignal(symbol, "BUY", "long_momo", features=features)
 
+            # Setup C (more aggressive): "3-of-4" confirmation.
+            # Goal: increase trade frequency under small notional caps. This is intentionally looser
+            # than cross-only MACD and will increase false positives.
+            checks = 0
+            checks += 1 if above_ema else 0
+            checks += 1 if above_vwap else 0
+            checks += 1 if volume_ratio >= max(0.70, float(self._volume_confirm_mult) * 0.70) else 0
+            checks += 1 if macd_bull else 0
+            rsi_ok = 45.0 <= float(last["rsi"]) <= 78.0
+            if htf_ok_long and rsi_ok and checks >= 3:
+                return StrategySignal(symbol, "BUY", "long_aggr_3of4", features=features)
+
         # Short entry (optional)
         if self._enable_shorts:
             rsi_rebound = float(last["rsi"]) >= float(self._rsi_rebound_min_short)
@@ -334,6 +346,16 @@ class V1RulesSignalEngine(BaseStrategy):
                 rsi_momo_short = float(last["rsi"]) <= 45.0
                 if htf_ok_short and rsi_momo_short and below_ema and macd_bear and vol_ok_short:
                     return StrategySignal(symbol, "SHORT", "short_momo", features=features)
+
+                # Setup C (more aggressive): "3-of-4" confirmation for shorts.
+                checks = 0
+                checks += 1 if below_ema else 0
+                checks += 1 if below_vwap else 0
+                checks += 1 if volume_ratio >= max(0.70, float(self._volume_confirm_mult) * 0.70) else 0
+                checks += 1 if macd_bear else 0
+                rsi_ok = 22.0 <= float(last["rsi"]) <= 58.0
+                if htf_ok_short and rsi_ok and checks >= 3:
+                    return StrategySignal(symbol, "SHORT", "short_aggr_3of4", features=features)
 
         # HOLD reason (keep it informative)
         if not htf_ok_long and not (self._enable_shorts and htf_ok_short):
