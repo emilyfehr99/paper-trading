@@ -15,6 +15,8 @@ from alpaca.trading.requests import (
     TakeProfitRequest,
 )
 
+from alpaca_day_bot.trading.updates import TradeUpdateEvent
+
 
 @dataclass(frozen=True)
 class ExecutionResult:
@@ -468,6 +470,74 @@ class OrderExecutor:
                     self._tc.cancel_order_by_id(oid)
             except Exception:
                 continue
+
+    def poll_order_fill_event(
+        self,
+        *,
+        order_id: str,
+        timeout_s: float,
+        poll_s: float,
+    ) -> TradeUpdateEvent | None:
+        """
+        REST fallback for scheduled ticks: poll an order by id and return a synthetic fill event
+        if it becomes filled/partially_filled within timeout.
+        """
+        oid = (order_id or "").strip()
+        if not oid:
+            return None
+        import time
+
+        t_end = time.time() + max(1.0, float(timeout_s))
+        poll = max(0.5, float(poll_s))
+        last_seen = None
+        while time.time() < t_end:
+            try:
+                o = self._tc.get_order_by_id(oid)
+            except Exception:
+                o = None
+            if o is not None:
+                try:
+                    status = str(getattr(o, "status", "") or "").lower()
+                    filled_qty = getattr(o, "filled_qty", None)
+                    filled_avg_price = getattr(o, "filled_avg_price", None)
+                    sym = getattr(o, "symbol", None)
+                    client_oid = getattr(o, "client_order_id", None)
+                    # order has timestamps; prefer filled_at/updated_at if present
+                    ts = getattr(o, "filled_at", None) or getattr(o, "updated_at", None) or getattr(o, "submitted_at", None)
+                    if status != last_seen:
+                        last_seen = status
+                    if status in ("filled", "partially_filled") or (
+                        filled_qty not in (None, "", 0, 0.0) and filled_avg_price not in (None, "", 0, 0.0)
+                    ):
+                        # Convert best-effort types
+                        try:
+                            fq = float(filled_qty) if filled_qty is not None else None
+                        except Exception:
+                            fq = None
+                        try:
+                            fpx = float(filled_avg_price) if filled_avg_price is not None else None
+                        except Exception:
+                            fpx = None
+                        dt = None
+                        try:
+                            if hasattr(ts, "tzinfo"):
+                                dt = ts
+                        except Exception:
+                            dt = None
+                        evt_ts = dt if dt is not None else datetime.now(tz=timezone.utc)
+                        payload = {"source": "rest_poll", "order": {"id": oid, "status": status}}
+                        return TradeUpdateEvent(
+                            event=("partial_fill" if status == "partially_filled" else "fill"),
+                            symbol=(None if sym is None else str(sym)),
+                            order_id=str(oid),
+                            client_order_id=(None if client_oid is None else str(client_oid)),
+                            filled_qty=fq,
+                            filled_avg_price=fpx,
+                            ts=(evt_ts if evt_ts.tzinfo is not None else evt_ts.replace(tzinfo=timezone.utc)),
+                            payload=payload,
+                        )
+            time.sleep(poll)
+        return None
 
 
 def now_utc() -> datetime:

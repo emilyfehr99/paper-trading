@@ -317,6 +317,7 @@ def _run_in_window_trading_cycle(
     *,
     settings,
     observe_only: bool,
+    scheduled_tick: bool,
     ledger: Ledger,
     executor: OrderExecutor,
     buffer: BarBuffer,
@@ -806,6 +807,23 @@ def _run_in_window_trading_cycle(
                     reason=f"synthetic_exit:{xres.reason}",
                     extra={"action": "EXIT_OCO", "qty": qty_int, "exit_side": exit_side},
                 )
+
+            # Scheduled ticks exit quickly; poll REST to confirm fills so we don't miss websocket events.
+            if (
+                scheduled_tick
+                and bool(getattr(settings, "fill_confirm_enabled", True))
+                and res.alpaca_order_id
+            ):
+                try:
+                    evt = executor.poll_order_fill_event(
+                        order_id=str(res.alpaca_order_id),
+                        timeout_s=float(getattr(settings, "fill_confirm_timeout_s", 60.0)),
+                        poll_s=float(getattr(settings, "fill_confirm_poll_s", 3.0)),
+                    )
+                    if evt is not None:
+                        ledger.record_trade_update(evt)
+                except Exception:
+                    pass
 
     ml_bundle = None
     if bool(getattr(settings, "model_enabled", False)):
@@ -1340,6 +1358,7 @@ def run(
                 last_signal_scan_ts = _run_in_window_trading_cycle(
                     settings=settings,
                     observe_only=observe_only,
+                    scheduled_tick=True,
                     ledger=ledger,
                     executor=executor,
                     buffer=buffer,
@@ -1404,6 +1423,7 @@ def run(
                 last_signal_scan_ts = _run_in_window_trading_cycle(
                     settings=settings,
                     observe_only=observe_only,
+                    scheduled_tick=False,
                     ledger=ledger,
                     executor=executor,
                     buffer=buffer,

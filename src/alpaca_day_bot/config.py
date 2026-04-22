@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     market_context_filter: bool = Field(default=False, alias="MARKET_CONTEXT_FILTER")
     spy_5m_rsi_min: float = Field(default=35.0, alias="SPY_5M_RSI_MIN")
 
+    # Scheduled-tick fill confirmation (REST polling) to avoid missing websocket fills after process exit.
+    fill_confirm_enabled: bool = Field(default=True, alias="FILL_CONFIRM_ENABLED")
+    fill_confirm_timeout_s: float = Field(default=60.0, alias="FILL_CONFIRM_TIMEOUT_S")
+    fill_confirm_poll_s: float = Field(default=3.0, alias="FILL_CONFIRM_POLL_S")
+
     # Strategy (V1 rules) — higher defaults = more candidate entries (also more risk).
     rsi_pullback_max: float = Field(default=42.0, alias="RSI_PULLBACK_MAX")
     volume_confirm_mult: float = Field(default=1.0, alias="VOLUME_CONFIRM_MULT")
