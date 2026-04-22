@@ -346,6 +346,66 @@ def _run_in_window_trading_cycle(
     # Per-cycle caches (avoid repeated external calls in a single scheduled tick).
     taapi_cache: dict[str, dict] = {}
     taapi_disabled_for_tick = False
+    news_cache: dict[str, dict] = {}
+
+    def _maybe_add_taapi_features(*, sym: str, feat: dict) -> None:
+        nonlocal taapi_disabled_for_tick
+        try:
+            if not (
+                (settings.indicator_provider or "").strip().lower() == "taapi"
+                and (settings.taapi_secret or "").strip()
+            ):
+                return
+            # Avoid hammering TAAPI (429s are common on free tiers).
+            ti_dict = taapi_cache.get(sym)
+            if ti_dict is None and not taapi_disabled_for_tick:
+                ti = fetch_taapi_indicators_for_stock(secret=settings.taapi_secret or "", symbol=sym)
+                ti_dict = {
+                    "rsi_1m": ti.rsi_1m,
+                    "rsi_15m": ti.rsi_15m,
+                    "macd_1m": ti.macd_1m,
+                    "macd_signal_1m": ti.macd_signal_1m,
+                }
+                taapi_cache[sym] = ti_dict
+                # If we got no usable TAAPI values, disable further TAAPI calls this tick.
+                if all(v is None for v in ti_dict.values()):
+                    taapi_disabled_for_tick = True
+            feat["taapi"] = ti_dict or {"rsi_1m": None, "rsi_15m": None, "macd_1m": None, "macd_signal_1m": None}
+            feat["taapi_ok"] = (
+                0
+                if all(feat["taapi"].get(k) is None for k in ("rsi_1m", "rsi_15m", "macd_1m", "macd_signal_1m"))
+                else 1
+            )
+        except Exception:
+            return
+
+    def _maybe_add_news_features(*, sym: str, feat: dict) -> dict[str, float | int]:
+        """
+        Fetch once per symbol per cycle (small universe), store bundle + derived fields.
+        Returns derived features dict (may be zeros).
+        """
+        try:
+            if not bool(getattr(settings, "news_fetch_enabled", False)):
+                return {"news_sent_wmean": 0.0, "news_event_risk": 0}
+            bundle = news_cache.get(sym)
+            if bundle is None:
+                bundle = fetch_news_for_symbol(
+                    symbol=sym,
+                    provider=settings.news_provider,
+                    alpaca_api_key_id=settings.apca_api_key_id,
+                    alpaca_secret_key=settings.apca_api_secret_key,
+                    alphavantage_api_key=settings.alphavantage_api_key,
+                    lookback_hours=float(settings.news_lookback_hours),
+                    limit=int(settings.news_limit),
+                )
+                news_cache[sym] = bundle if isinstance(bundle, dict) else {"ok": False, "count": 0, "articles": []}
+            if isinstance(bundle, dict):
+                feat["news"] = bundle
+            nf = _derive_news_features(bundle if isinstance(bundle, dict) else None)
+            feat.update(nf)
+            return nf
+        except Exception:
+            return {"news_sent_wmean": 0.0, "news_event_risk": 0}
 
     def _derive_news_features(bundle: dict | None) -> dict[str, float | int]:
         """
@@ -661,22 +721,7 @@ def _run_in_window_trading_cycle(
             and bool(settings.taapi_confirm_on_trade)
             and (settings.taapi_secret or "").strip()
         ):
-            # Avoid hammering TAAPI (429s are common on free tiers).
-            ti_dict = taapi_cache.get(sym)
-            if ti_dict is None and not taapi_disabled_for_tick:
-                ti = fetch_taapi_indicators_for_stock(secret=settings.taapi_secret or "", symbol=sym)
-                ti_dict = {
-                    "rsi_1m": ti.rsi_1m,
-                    "rsi_15m": ti.rsi_15m,
-                    "macd_1m": ti.macd_1m,
-                    "macd_signal_1m": ti.macd_signal_1m,
-                }
-                taapi_cache[sym] = ti_dict
-                # If we got no usable TAAPI values, disable further TAAPI calls this tick.
-                if all(v is None for v in ti_dict.values()):
-                    taapi_disabled_for_tick = True
-            feat["taapi"] = ti_dict or {"rsi_1m": None, "rsi_15m": None, "macd_1m": None, "macd_signal_1m": None}
-            feat["taapi_ok"] = 0 if all(feat["taapi"].get(k) is None for k in ("rsi_1m", "rsi_15m", "macd_1m", "macd_signal_1m")) else 1
+            _maybe_add_taapi_features(sym=sym, feat=feat)
             trsi1 = feat["taapi"].get("rsi_1m")
             trsi15 = feat["taapi"].get("rsi_15m")
             tmacd = feat["taapi"].get("macd_1m")
@@ -981,35 +1026,29 @@ def _run_in_window_trading_cycle(
         except Exception:
             pass
 
-        if sig.action == "BUY" and settings.news_fetch_enabled:
-            bundle = fetch_news_for_symbol(
-                symbol=sym,
-                provider=settings.news_provider,
-                alpaca_api_key_id=settings.apca_api_key_id,
-                alpaca_secret_key=settings.apca_api_secret_key,
-                alphavantage_api_key=settings.alphavantage_api_key,
-                lookback_hours=float(settings.news_lookback_hours),
-                limit=int(settings.news_limit),
-            )
-            feat["news"] = bundle
-            # Derived, compact news features for ML + gating.
-            nf = _derive_news_features(bundle if isinstance(bundle, dict) else None)
-            feat.update(nf)
+        # Record news+TAAPI feature visibility even if this becomes HOLD.
+        _maybe_add_taapi_features(sym=sym, feat=feat)
+        nf = _maybe_add_news_features(sym=sym, feat=feat)
 
-            # Research-backed: avoid trading into discrete news shocks (earnings/offering/halt/etc).
+        # Apply news gating only when we'd otherwise trade.
+        if action in ("BUY", "SHORT"):
             try:
                 if bool(getattr(settings, "news_block_on_event_risk", True)) and int(nf.get("news_event_risk", 0) or 0) == 1:
                     action = "HOLD"
                     reason = "news_event_risk"
             except Exception:
                 pass
-            if news_bundle_should_block(
-                bundle,
-                settings.news_gate_mode,
-                int(settings.news_busy_min_articles),
-            ):
-                action = "HOLD"
-                reason = "news_gate"
+            try:
+                bundle_now = feat.get("news") if isinstance(feat.get("news"), dict) else {"ok": False, "count": 0, "articles": []}
+                if news_bundle_should_block(
+                    bundle_now,
+                    settings.news_gate_mode,
+                    int(settings.news_busy_min_articles),
+                ):
+                    action = "HOLD"
+                    reason = "news_gate"
+            except Exception:
+                pass
 
         # ML scoring (filter + rank): score candidates but don't submit yet.
         if action in ("BUY", "SHORT") and ml_bundle is not None:
