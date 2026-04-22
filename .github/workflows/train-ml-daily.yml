@@ -22,12 +22,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: NY market date (cache key)
+        id: nydate
+        run: |
+          echo "d=$(python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('America/New_York')).date().isoformat())")" >> "$GITHUB_OUTPUT"
+
       - name: Restore state (ledger + models)
         uses: actions/cache@v4
         with:
           path: state
-          key: alpaca-paper-state-${{ runner.os }}-ml-${{ github.run_id }}
+          # Cache keys are immutable; write ML runs to a unique key, and let the live tick restore the newest via restore-keys.
+          key: alpaca-paper-state-${{ runner.os }}-ml-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
           restore-keys: |
+            alpaca-paper-state-${{ runner.os }}-ml-${{ steps.nydate.outputs.d }}-
             alpaca-paper-state-${{ runner.os }}-
 
       - name: Install package

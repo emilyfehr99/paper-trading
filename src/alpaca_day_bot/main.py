@@ -338,7 +338,87 @@ def _run_in_window_trading_cycle(
     # Load ML bundle early so exits can use it too.
     ml_bundle = None
     if bool(getattr(settings, "model_enabled", False)):
-        ml_bundle = _load_ml_model(getattr(settings, "model_path", "state/models/latest.joblib"))
+        mp = getattr(settings, "model_path", "state/models/latest.joblib")
+        ml_bundle = _load_ml_model(mp)
+        if ml_bundle is None:
+            log.warning("ml_model_not_loaded path=%s", mp)
+
+    # Per-cycle caches (avoid repeated external calls in a single scheduled tick).
+    taapi_cache: dict[str, dict] = {}
+    taapi_disabled_for_tick = False
+
+    def _derive_news_features(bundle: dict | None) -> dict[str, float | int]:
+        """
+        Compute lightweight, model-friendly features from the (possibly large) news bundle.
+        Stored at top-level fields for easy querying/training.
+        """
+        try:
+            if not isinstance(bundle, dict):
+                return {"news_sent_wmean": 0.0, "news_event_risk": 0}
+            arts = bundle.get("articles")
+            if not isinstance(arts, list) or not arts:
+                return {"news_sent_wmean": 0.0, "news_event_risk": 0}
+
+            # Event risk keyword scan (cheap, robust).
+            txt = " ".join(
+                [
+                    f"{(a.get('headline') or '')} {(a.get('summary') or '')}"
+                    for a in arts
+                    if isinstance(a, dict)
+                ]
+            ).lower()
+            risk_words = (
+                "earnings",
+                "offering",
+                "secondary",
+                "sec ",
+                "investigation",
+                "lawsuit",
+                "guidance",
+                "halt",
+                "bankruptcy",
+                "merger",
+                "acquisition",
+            )
+            event_risk = 1 if (txt and any(w in txt for w in risk_words)) else 0
+
+            # Recency-weighted mean sentiment (half-life ~24h).
+            from datetime import datetime, timezone
+
+            now = datetime.now(tz=timezone.utc)
+            half_life_h = 24.0
+            w_sum = 0.0
+            sw_sum = 0.0
+            for a in arts:
+                if not isinstance(a, dict):
+                    continue
+                sc = a.get("sentiment_score")
+                if sc is None:
+                    continue
+                try:
+                    s = float(sc)
+                except Exception:
+                    continue
+                created_at = a.get("created_at")
+                age_h = None
+                if isinstance(created_at, str) and created_at:
+                    try:
+                        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        age_h = max(0.0, (now - dt).total_seconds() / 3600.0)
+                    except Exception:
+                        age_h = None
+                # If timestamp missing/invalid, treat as stale.
+                if age_h is None:
+                    age_h = 7.0 * 24.0
+                w = 0.5 ** (age_h / half_life_h) if half_life_h > 0 else 1.0
+                w_sum += w
+                sw_sum += w * s
+            sent_wmean = (sw_sum / w_sum) if w_sum > 1e-12 else 0.0
+            return {"news_sent_wmean": float(sent_wmean), "news_event_risk": int(event_risk)}
+        except Exception:
+            return {"news_sent_wmean": 0.0, "news_event_risk": 0}
 
     def _regime_label(*, df_1m, df_15m) -> str | None:
         """
@@ -581,34 +661,47 @@ def _run_in_window_trading_cycle(
             and bool(settings.taapi_confirm_on_trade)
             and (settings.taapi_secret or "").strip()
         ):
-            ti = fetch_taapi_indicators_for_stock(secret=settings.taapi_secret or "", symbol=sym)
-            feat["taapi"] = {
-                "rsi_1m": ti.rsi_1m,
-                "rsi_15m": ti.rsi_15m,
-                "macd_1m": ti.macd_1m,
-                "macd_signal_1m": ti.macd_signal_1m,
-            }
+            # Avoid hammering TAAPI (429s are common on free tiers).
+            ti_dict = taapi_cache.get(sym)
+            if ti_dict is None and not taapi_disabled_for_tick:
+                ti = fetch_taapi_indicators_for_stock(secret=settings.taapi_secret or "", symbol=sym)
+                ti_dict = {
+                    "rsi_1m": ti.rsi_1m,
+                    "rsi_15m": ti.rsi_15m,
+                    "macd_1m": ti.macd_1m,
+                    "macd_signal_1m": ti.macd_signal_1m,
+                }
+                taapi_cache[sym] = ti_dict
+                # If we got no usable TAAPI values, disable further TAAPI calls this tick.
+                if all(v is None for v in ti_dict.values()):
+                    taapi_disabled_for_tick = True
+            feat["taapi"] = ti_dict or {"rsi_1m": None, "rsi_15m": None, "macd_1m": None, "macd_signal_1m": None}
+            feat["taapi_ok"] = 0 if all(feat["taapi"].get(k) is None for k in ("rsi_1m", "rsi_15m", "macd_1m", "macd_signal_1m")) else 1
+            trsi1 = feat["taapi"].get("rsi_1m")
+            trsi15 = feat["taapi"].get("rsi_15m")
+            tmacd = feat["taapi"].get("macd_1m")
+            tmacds = feat["taapi"].get("macd_signal_1m")
             if action == "BUY":
-                if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
+                if trsi1 is None or trsi15 is None or tmacd is None or tmacds is None:
                     if not bool(getattr(settings, "taapi_fail_open", True)):
                         return
                 else:
                     ok = (
-                        ti.rsi_1m <= float(settings.rsi_pullback_max)
-                        and ti.rsi_15m >= float(settings.htf_rsi_min)
-                        and ti.macd_1m >= ti.macd_signal_1m
+                        float(trsi1) <= float(settings.rsi_pullback_max)
+                        and float(trsi15) >= float(settings.htf_rsi_min)
+                        and float(tmacd) >= float(tmacds)
                     )
                     if not ok:
                         return
             else:
-                if ti.rsi_1m is None or ti.rsi_15m is None or ti.macd_1m is None or ti.macd_signal_1m is None:
+                if trsi1 is None or trsi15 is None or tmacd is None or tmacds is None:
                     if not bool(getattr(settings, "taapi_fail_open", True)):
                         return
                 else:
                     ok = (
-                        ti.rsi_15m <= float(settings.htf_rsi_max_short)
-                        and ti.rsi_1m >= float(settings.rsi_rebound_min_short)
-                        and ti.macd_1m <= ti.macd_signal_1m
+                        float(trsi15) <= float(settings.htf_rsi_max_short)
+                        and float(trsi1) >= float(settings.rsi_rebound_min_short)
+                        and float(tmacd) <= float(tmacds)
                     )
                     if not ok:
                         return
@@ -899,34 +992,15 @@ def _run_in_window_trading_cycle(
                 limit=int(settings.news_limit),
             )
             feat["news"] = bundle
+            # Derived, compact news features for ML + gating.
+            nf = _derive_news_features(bundle if isinstance(bundle, dict) else None)
+            feat.update(nf)
+
             # Research-backed: avoid trading into discrete news shocks (earnings/offering/halt/etc).
             try:
-                if bool(getattr(settings, "news_block_on_event_risk", True)):
-                    arts = (bundle or {}).get("articles") if isinstance(bundle, dict) else None
-                    if isinstance(arts, list):
-                        txt = " ".join(
-                            [
-                                f"{(a.get('headline') or '')} {(a.get('summary') or '')}"
-                                for a in arts
-                                if isinstance(a, dict)
-                            ]
-                        ).lower()
-                        risk_words = (
-                            "earnings",
-                            "offering",
-                            "secondary",
-                            "sec ",
-                            "investigation",
-                            "lawsuit",
-                            "guidance",
-                            "halt",
-                            "bankruptcy",
-                            "merger",
-                            "acquisition",
-                        )
-                        if txt and any(w in txt for w in risk_words):
-                            action = "HOLD"
-                            reason = "news_event_risk"
+                if bool(getattr(settings, "news_block_on_event_risk", True)) and int(nf.get("news_event_risk", 0) or 0) == 1:
+                    action = "HOLD"
+                    reason = "news_event_risk"
             except Exception:
                 pass
             if news_bundle_should_block(
