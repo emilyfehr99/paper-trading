@@ -99,7 +99,10 @@ jobs:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           UNIVERSE_ENABLED: "true"
-          # Defaults are sane; override via repo variables if desired.
+          # Wider universe -> more trade opportunities
+          UNIVERSE_MAX_SYMBOLS: "2000"
+          UNIVERSE_MIN_AVG_DOLLAR_VOL: "5000000"
+          UNIVERSE_MIN_PRICE: "1"
         run: python -m alpaca_day_bot --build-universe
 
       - name: Scheduled tick
@@ -131,8 +134,11 @@ jobs:
           # Keep whole-share sizing compatible with the per-trade cap
           UNIVERSE_MAX_PRICE: "50"
           # Loosen HTF trend gates so more setups qualify
-          HTF_RSI_MIN: "40"
-          HTF_RSI_MAX_SHORT: "60"
+          HTF_RSI_MIN: "35"
+          HTF_RSI_MAX_SHORT: "70"
+          RSI_PULLBACK_MAX: "55"
+          RSI_REBOUND_MIN_SHORT: "50"
+          VOLUME_CONFIRM_MULT: "0.8"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Upload state artifact (debug / backup)

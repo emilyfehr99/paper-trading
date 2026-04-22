@@ -331,6 +331,11 @@ class V1RulesSignalEngine(BaseStrategy):
             if htf_ok_long and rsi_ok and checks >= 3:
                 return StrategySignal(symbol, "BUY", "long_aggr_3of4", features=features)
 
+            # Setup D (max frequency): "2-of-4" confirmation.
+            # This is intentionally very loose to drive trade count; expect more noise.
+            if htf_ok_long and rsi_ok and checks >= 2:
+                return StrategySignal(symbol, "BUY", "long_aggr_2of4", features=features)
+
         # Short entry (optional)
         if self._enable_shorts:
             rsi_rebound = float(last["rsi"]) >= float(self._rsi_rebound_min_short)
@@ -356,6 +361,10 @@ class V1RulesSignalEngine(BaseStrategy):
                 rsi_ok = 22.0 <= float(last["rsi"]) <= 58.0
                 if htf_ok_short and rsi_ok and checks >= 3:
                     return StrategySignal(symbol, "SHORT", "short_aggr_3of4", features=features)
+
+                # Setup D (max frequency): "2-of-4" confirmation for shorts.
+                if htf_ok_short and rsi_ok and checks >= 2:
+                    return StrategySignal(symbol, "SHORT", "short_aggr_2of4", features=features)
 
         # HOLD reason (keep it informative)
         if not htf_ok_long and not (self._enable_shorts and htf_ok_short):
