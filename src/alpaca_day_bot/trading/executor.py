@@ -536,6 +536,9 @@ class OrderExecutor:
                             ts=(evt_ts if evt_ts.tzinfo is not None else evt_ts.replace(tzinfo=timezone.utc)),
                             payload=payload,
                         )
+                except Exception:
+                    # ignore parse errors and keep polling
+                    pass
             time.sleep(poll)
         return None
 
