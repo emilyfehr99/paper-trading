@@ -9,8 +9,9 @@ name: Paper scheduled tick
 on:
   workflow_dispatch:
   schedule:
-    # Every 15 min, Mon–Fri, UTC13–21 only (rough overlap with US RTH); exact window enforced below.
-    - cron: "*/15 13-21 * * 1-5"
+    # Every 15 min, Mon–Fri; exact trade window enforced by NY-time gate below.
+    # (Wider cron makes scheduling more robust if GitHub misses a narrow hour window.)
+    - cron: "*/15 * * * 1-5"
 
 concurrency:
   group: alpaca-paper-scheduled-tick
