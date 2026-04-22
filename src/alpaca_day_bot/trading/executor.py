@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.trading.requests import (
+    GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
     StopLossRequest,
@@ -440,7 +441,33 @@ class OrderExecutor:
             _ = self._tc.close_position(sym)
             return ExecutionResult(True, "close_submitted", client_order_id=None, alpaca_order_id=None)
         except Exception as e:
+            msg = str(e)
+            # Common when bracket/OCO legs are still open: shares are held_for_orders.
+            if "insufficient qty available for order" in msg or "\"held_for_orders\"" in msg:
+                try:
+                    self._cancel_open_orders_for_symbol(sym)
+                    _ = self._tc.close_position(sym)
+                    return ExecutionResult(True, "close_submitted_after_cancel", client_order_id=None, alpaca_order_id=None)
+                except Exception as e2:
+                    return ExecutionResult(False, f"close_error:{e2}", client_order_id=None, alpaca_order_id=None)
             return ExecutionResult(False, f"close_error:{e}", client_order_id=None, alpaca_order_id=None)
+
+    def _cancel_open_orders_for_symbol(self, symbol: str) -> None:
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return
+        try:
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym], nested=True, limit=500)
+            orders = self._tc.get_orders(req) or []
+        except Exception:
+            orders = []
+        for o in orders:
+            try:
+                oid = str(getattr(o, "id", "") or "")
+                if oid:
+                    self._tc.cancel_order_by_id(oid)
+            except Exception:
+                continue
 
 
 def now_utc() -> datetime:
