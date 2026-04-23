@@ -746,6 +746,36 @@ def _run_in_window_trading_cycle(
         if executor.has_position(sym):
             return
 
+        # Optional confirmation: require the setup to persist for N bars.
+        try:
+            cb = int(getattr(settings, "confirm_bars", 1) or 1)
+        except Exception:
+            cb = 1
+        if cb > 1:
+            try:
+                import pandas_ta as ta
+                import numpy as np
+
+                if len(df_1m) < 25:
+                    return
+                tmp = df_1m.copy()
+                tmp["ema_20"] = ta.ema(tmp["close"], length=20)
+                tmp["rsi"] = ta.rsi(tmp["close"], length=14)
+                macd = ta.macd(tmp["close"], fast=12, slow=26, signal=9)
+                if macd is not None:
+                    tmp = pd.concat([tmp, macd], axis=1)  # type: ignore[name-defined]
+                # use last N bars to confirm directionally
+                lastn = tmp.tail(cb)
+                if action == "BUY":
+                    if not bool(np.all(lastn["close"] > lastn["ema_20"])):  # type: ignore[index]
+                        return
+                else:
+                    if not bool(np.all(lastn["close"] < lastn["ema_20"])):  # type: ignore[index]
+                        return
+            except Exception:
+                # If confirmation calc fails, fail open (don't block trades).
+                pass
+
         # Correlation guard: avoid stacking highly correlated names (accuracy + drawdown stability).
         max_corr = float(getattr(settings, "max_corr_with_open_positions", 0.0) or 0.0)
         if max_corr > 0:
@@ -861,6 +891,21 @@ def _run_in_window_trading_cycle(
             atr = float(feat.get("atr") or 0.0)
             atr_m = float(feat.get("atr_monthly") or feat.get("atr_avg") or 0.0)
             if atr_m > 1e-12 and atr > 1.5 * atr_m:
+                if bool(getattr(settings, "vol_spike_skip_enabled", False)):
+                    ledger.record_order_intent(
+                        ts=t0,
+                        symbol=sym,
+                        side=("buy" if action == "BUY" else "sell"),
+                        notional_usd=0.0,
+                        stop_price=stop_price,
+                        take_profit_price=tp_price,
+                        client_order_id=None,
+                        alpaca_order_id=None,
+                        submitted=False,
+                        reason="vol_spike_skip",
+                        extra={"action": action, "atr": atr, "atr_monthly": atr_m},
+                    )
+                    return
                 qty_f = qty_f * 0.5
                 feat["vol_gated_size"] = 1
         except Exception:

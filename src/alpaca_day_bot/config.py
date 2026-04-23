@@ -180,6 +180,10 @@ class Settings(BaseSettings):
     # Synthetic exits: submit entry without bracket, then attach OCO TP/SL as separate orders.
     synthetic_exits_enabled: bool = Field(default=False, alias="SYNTHETIC_EXITS_ENABLED")
 
+    # Profit-focused guardrails
+    confirm_bars: int = Field(default=1, alias="CONFIRM_BARS")  # require setup to persist N bars
+    vol_spike_skip_enabled: bool = Field(default=False, alias="VOL_SPIKE_SKIP_ENABLED")
+
     # Virtual options (mock calls/puts; NOT sent to Alpaca)
     sim_options_enabled: bool = Field(default=False, alias="SIM_OPTIONS_ENABLED")
     # Risk: at worst you lose the notional (like long premium). Profit scales with leverage * underlying move.
