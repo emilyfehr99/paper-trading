@@ -214,7 +214,7 @@ def _label_signals_triple_barrier(
     """
     if not settings.signal_accuracy_enabled:
         return
-    pending = ledger.list_unlabeled_signal_rows(
+    pending = ledger.list_unlabeled_signal_rows_for_triple_barrier(
         market_day=market_day,
         tz=settings.tzinfo(),
         now_utc=t0,
