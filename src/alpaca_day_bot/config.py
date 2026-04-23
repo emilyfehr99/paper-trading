@@ -93,11 +93,15 @@ class Settings(BaseSettings):
     htf_rsi_min: float = Field(default=45.0, alias="HTF_RSI_MIN")
     atr_regime_max_mult: float = Field(default=2.5, alias="ATR_REGIME_MAX_MULT")
     aggressive_mode: bool = Field(default=False, alias="AGGRESSIVE_MODE")
-    indicator_provider: str = Field(default="local", alias="INDICATOR_PROVIDER")  # local | taapi
+    indicator_provider: str = Field(default="local", alias="INDICATOR_PROVIDER")  # local | taapi | tvta
     taapi_secret: str | None = Field(default=None, alias="TAAPI_SECRET")
     taapi_confirm_on_trade: bool = Field(default=True, alias="TAAPI_CONFIRM_ON_TRADE")
     # If TAAPI is rate-limited / forbidden, do not block trades (still record taapi in features).
     taapi_fail_open: bool = Field(default=True, alias="TAAPI_FAIL_OPEN")
+    # Your TV TA API (FastAPI) base URL, e.g. http://127.0.0.1:8000
+    tvta_api_base_url: str | None = Field(default=None, alias="TVTA_API_BASE_URL")
+    # Prefix used to convert symbols into TradingView style, e.g. NYSE:NIO. Empty => raw symbol.
+    tvta_symbol_prefix: str = Field(default="NYSE", alias="TVTA_SYMBOL_PREFIX")
 
     # ML model layer (trained from ledger labels)
     model_enabled: bool = Field(default=False, alias="MODEL_ENABLED")

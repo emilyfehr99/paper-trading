@@ -15,6 +15,7 @@ import pandas as pd
 from alpaca_day_bot.config import load_settings
 from alpaca_day_bot.data.news import fetch_news_for_symbol, news_bundle_should_block
 from alpaca_day_bot.data.taapi import fetch_taapi_indicators_for_stock
+from alpaca_day_bot.data.tvta import fetch_tvta_indicators_for_stock
 from alpaca_day_bot.data.stream import BarBuffer, MarketDataStreamer
 from alpaca_day_bot.logging_utils import setup_json_logging
 from alpaca_day_bot.ml.infer import load_model as _load_ml_model, predict_proba as _ml_predict_proba
@@ -355,6 +356,7 @@ def _run_in_window_trading_cycle(
     # Per-cycle caches (avoid repeated external calls in a single scheduled tick).
     taapi_cache: dict[str, dict] = {}
     taapi_disabled_for_tick = False
+    tvta_cache: dict[str, dict] = {}
     news_cache: dict[str, dict] = {}
 
     def _maybe_add_taapi_features(*, sym: str, feat: dict) -> None:
@@ -385,6 +387,47 @@ def _run_in_window_trading_cycle(
                 if all(feat["taapi"].get(k) is None for k in ("rsi_1m", "rsi_15m", "macd_1m", "macd_signal_1m"))
                 else 1
             )
+        except Exception:
+            return
+
+    def _maybe_add_tvta_features(*, sym: str, feat: dict) -> None:
+        try:
+            if (settings.indicator_provider or "").strip().lower() != "tvta":
+                return
+            base = (getattr(settings, "tvta_api_base_url", None) or "").strip()
+            if not base:
+                return
+            prefix = str(getattr(settings, "tvta_symbol_prefix", "NYSE") or "NYSE")
+            ti_dict = tvta_cache.get(sym)
+            if ti_dict is None:
+                ti = fetch_tvta_indicators_for_stock(base_url=base, symbol=sym, symbol_prefix=prefix)
+                ti_dict = {
+                    "rsi_1m": ti.rsi_1m,
+                    "rsi_15m": ti.rsi_15m,
+                    "macd_1m": ti.macd_1m,
+                    "macd_signal_1m": ti.macd_signal_1m,
+                    "raw_1m": ti.raw_1m,
+                    "raw_15m": ti.raw_15m,
+                }
+                tvta_cache[sym] = ti_dict
+            feat["tvta"] = ti_dict or {}
+            feat["tvta_ok"] = (
+                0
+                if all(
+                    (feat.get("tvta") or {}).get(k) is None
+                    for k in ("rsi_1m", "rsi_15m", "macd_1m", "macd_signal_1m")
+                )
+                else 1
+            )
+            # Provide a taapi-shaped view so downstream ML/features can stay stable.
+            if "taapi" not in feat:
+                feat["taapi"] = {
+                    "rsi_1m": (feat.get("tvta") or {}).get("rsi_1m"),
+                    "rsi_15m": (feat.get("tvta") or {}).get("rsi_15m"),
+                    "macd_1m": (feat.get("tvta") or {}).get("macd_1m"),
+                    "macd_signal_1m": (feat.get("tvta") or {}).get("macd_signal_1m"),
+                }
+                feat["taapi_ok"] = feat.get("tvta_ok", 0)
         except Exception:
             return
 
@@ -1035,8 +1078,9 @@ def _run_in_window_trading_cycle(
         except Exception:
             pass
 
-        # Record news+TAAPI feature visibility even if this becomes HOLD.
+        # Record news+indicator feature visibility even if this becomes HOLD.
         _maybe_add_taapi_features(sym=sym, feat=feat)
+        _maybe_add_tvta_features(sym=sym, feat=feat)
         nf = _maybe_add_news_features(sym=sym, feat=feat)
 
         # Apply news gating only when we'd otherwise trade.
