@@ -101,6 +101,12 @@ class V1RulesSignalEngine(BaseStrategy):
         df["volume_sma"] = df["volume"].rolling(int(self._volume_sma_len)).mean()
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(self._atr_len))
         df["atr_avg"] = df["atr"].rolling(int(self._atr_regime_lookback)).mean()
+        # "Monthly" ATR proxy for volatility gating (prefer ~20 trading days if available).
+        monthly_lb = int(390 * 20)
+        if len(df) >= monthly_lb:
+            df["atr_monthly"] = df["atr"].rolling(monthly_lb).mean()
+        else:
+            df["atr_monthly"] = df["atr_avg"]
 
         last = df.iloc[-1]
         if pd.isna(last.get("rsi")) or pd.isna(last.get("ema_20")) or pd.isna(last.get("vwap_calc")):
@@ -300,6 +306,7 @@ class V1RulesSignalEngine(BaseStrategy):
             "htf_rsi": float(htf_last["rsi"]) if not pd.isna(htf_last.get("rsi")) else None,
             "atr": atr,
             "atr_avg": atr_avg,
+            "atr_monthly": (float(last.get("atr_monthly")) if not pd.isna(last.get("atr_monthly")) else atr_avg),
             "htf_ok_long": bool(htf_ok_long),
             "htf_ok_short": bool(htf_ok_short),
         }

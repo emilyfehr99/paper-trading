@@ -14,6 +14,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
 from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier
 
 from alpaca_day_bot.ml.dataset import build_signal_label_dataset
 
@@ -82,12 +83,39 @@ def train_and_save(
     # Chronological split (reduce leakage): last 25% as test, with a small embargo to reduce overlap.
     n = len(X)
     cut = max(10, int(n * 0.75))
-    embargo = min(50, max(5, int(n * 0.02)))
-    cut2 = min(n, cut + embargo)
-    X_train, y_train = X.iloc[:cut], y.iloc[:cut]
-    X_test, y_test = X.iloc[cut2:], y.iloc[cut2:]
+    # Time-series purging: enforce a 60-minute "dead zone" around the split timestamp.
+    try:
+        import pandas as pd
+
+        ts = pd.to_datetime(meta["ts"], utc=True, errors="coerce")
+    except Exception:
+        ts = None
+
+    cut_ts = None
+    if ts is not None and len(ts) > cut:
+        try:
+            cut_ts = ts.iloc[cut]
+            if getattr(cut_ts, "tzinfo", None) is None:
+                cut_ts = None
+        except Exception:
+            cut_ts = None
+
+    purge_minutes = 60.0
+    if cut_ts is not None and ts is not None:
+        gap = pd.Timedelta(minutes=float(purge_minutes))
+        train_mask = ts < (cut_ts - gap)
+        test_mask = ts > (cut_ts + gap)
+        X_train, y_train = X.loc[train_mask], y.loc[train_mask]
+        X_test, y_test = X.loc[test_mask], y.loc[test_mask]
+    else:
+        # Fallback: row-embargo.
+        embargo = min(50, max(5, int(n * 0.02)))
+        cut2 = min(n, cut + embargo)
+        X_train, y_train = X.iloc[:cut], y.iloc[:cut]
+        X_test, y_test = X.iloc[cut2:], y.iloc[cut2:]
+
     if len(X_test) < 20:
-        # If too small after embargo, fall back to no embargo.
+        # If too small after purging, fall back to a simple chronological split (no dead zone).
         X_train, X_test = X.iloc[:cut], X.iloc[cut:]
         y_train, y_test = y.iloc[:cut], y.iloc[cut:]
 
@@ -135,6 +163,23 @@ def train_and_save(
             ("clf", LogisticRegression(max_iter=2000, n_jobs=1)),
         ]
     )
+
+    # Meta-labeling model (nonlinear): RandomForest on success/fail history
+    rf = Pipeline(
+        steps=[
+            ("impute", SimpleImputer(strategy="median")),
+            (
+                "clf",
+                RandomForestClassifier(
+                    n_estimators=400,
+                    max_depth=8,
+                    min_samples_leaf=10,
+                    random_state=42,
+                    n_jobs=1,
+                ),
+            ),
+        ]
+    )
     # Calibration needs enough samples per class. For very small datasets, skip calibration.
     counts: dict[int, int] = {}
     try:
@@ -152,6 +197,15 @@ def train_and_save(
     else:
         logreg.fit(X_train, y_train)
         base_model = logreg
+
+    # RF calibration only if enough samples per class; else fit raw.
+    if cv >= 2:
+        rf_cal = CalibratedClassifierCV(rf, method="isotonic", cv=cv)
+        rf_cal.fit(X_train, y_train)
+        rf_model = rf_cal
+    else:
+        rf.fit(X_train, y_train)
+        rf_model = rf
 
     # LightGBM (if available)
     lgbm_model = None
@@ -222,13 +276,16 @@ def train_and_save(
 
     m_log, extra_log, proba_log = eval_model(base_model)
     best = ("logreg", base_model, m_log, extra_log, proba_log)
+    m_rf, extra_rf, proba_rf = eval_model(rf_model)
+    # prefer RF if it scores better (AUC when available, else accuracy)
+    def score(m: TrainMetrics) -> float:
+        return (m.auc if m.auc is not None else m.acc)
+    if score(m_rf) >= score(best[2]):
+        best = ("rf", rf_model, m_rf, extra_rf, proba_rf)
     if lgbm_cal is not None:
         m_lgb, extra_lgb, proba_lgb = eval_model(lgbm_cal)
         # choose by AUC when available, otherwise accuracy
-        def score(m: TrainMetrics) -> float:
-            return (m.auc if m.auc is not None else m.acc)
-
-        if score(m_lgb) >= score(m_log):
+        if score(m_lgb) >= score(best[2]):
             best = ("lgbm", lgbm_cal, m_lgb, extra_lgb, proba_lgb)
 
     provider, model, metrics, extra_metrics, proba_best = best

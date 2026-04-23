@@ -809,8 +809,22 @@ def _run_in_window_trading_cycle(
                         return
 
         last_close = float(df_1m["close"].iloc[-1])
-        last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
-        stop_dist = max(0.01, last_range * settings.stop_loss_atr_mult)
+        # Triple-barrier/exit sizing: use ATR-based distance to reduce noise.
+        atr = None
+        try:
+            atr = float(feat.get("atr")) if feat.get("atr") is not None else None
+        except Exception:
+            atr = None
+        if atr is None or atr <= 0:
+            try:
+                import pandas_ta as ta
+
+                s_atr = ta.atr(df_1m["high"], df_1m["low"], df_1m["close"], length=14)
+                if s_atr is not None and not s_atr.dropna().empty:
+                    atr = float(s_atr.dropna().iloc[-1])
+            except Exception:
+                atr = None
+        stop_dist = max(0.01, float(atr or 0.0) * 2.0)
         if action == "BUY":
             stop_price = last_close - stop_dist
             tp_price = last_close + stop_dist * settings.take_profit_r_mult
@@ -840,14 +854,26 @@ def _run_in_window_trading_cycle(
         if not rd.allow:
             return
 
-        qty_int = int(float(rd.qty))
+        # Volatility gating (regime handling): if current ATR is unusually high vs "monthly" ATR,
+        # halve the position size.
+        qty_f = float(rd.qty)
+        try:
+            atr = float(feat.get("atr") or 0.0)
+            atr_m = float(feat.get("atr_monthly") or feat.get("atr_avg") or 0.0)
+            if atr_m > 1e-12 and atr > 1.5 * atr_m:
+                qty_f = qty_f * 0.5
+                feat["vol_gated_size"] = 1
+        except Exception:
+            pass
+
+        qty_int = int(qty_f)
         if qty_int <= 0:
             # Most commonly: MAX_NOTIONAL_PER_TRADE_USD cap + whole-share requirement.
             ledger.record_order_intent(
                 ts=t0,
                 symbol=sym,
                 side=("buy" if action == "BUY" else "sell"),
-                notional_usd=float(rd.notional_usd or 0.0),
+                notional_usd=float((qty_int * last_close) if qty_int > 0 else (rd.notional_usd or 0.0)),
                 stop_price=stop_price,
                 take_profit_price=tp_price,
                 client_order_id=None,
@@ -1093,13 +1119,19 @@ def _run_in_window_trading_cycle(
         try:
             last_close = float(feat.get("close") or df_1m["close"].iloc[-1])
             last_range = float((df_1m["high"].iloc[-1] - df_1m["low"].iloc[-1]))
-            stop_dist = max(0.01, last_range * float(settings.stop_loss_atr_mult))
+            # For ML labels: set barriers from ATR (2.0x) rather than bar-range.
+            atr0 = None
+            try:
+                atr0 = float(feat.get("atr")) if feat.get("atr") is not None else None
+            except Exception:
+                atr0 = None
+            stop_dist = max(0.01, float(atr0 or 0.0) * 2.0)
             if action == "BUY":
                 sl_price = last_close - stop_dist
-                tp_price = last_close + stop_dist * float(settings.take_profit_r_mult)
+                tp_price = last_close + stop_dist
             else:
                 sl_price = last_close + stop_dist
-                tp_price = last_close - stop_dist * float(settings.take_profit_r_mult)
+                tp_price = last_close - stop_dist
             feat["tp_price"] = float(tp_price)
             feat["sl_price"] = float(sl_price)
         except Exception:
