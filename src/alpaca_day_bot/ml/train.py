@@ -97,8 +97,23 @@ def train_and_save(
             ("clf", LogisticRegression(max_iter=2000, n_jobs=1)),
         ]
     )
-    cal = CalibratedClassifierCV(logreg, method="isotonic", cv=3)
-    cal.fit(X_train, y_train)
+    # Calibration needs enough samples per class. For very small datasets, skip calibration.
+    counts: dict[int, int] = {}
+    try:
+        for v in list(y_train):
+            iv = int(v)
+            counts[iv] = counts.get(iv, 0) + 1
+    except Exception:
+        counts = {}
+    min_class = min(counts.values()) if counts else 0
+    cv = min(3, int(min_class)) if min_class else 0
+    if cv >= 2:
+        cal = CalibratedClassifierCV(logreg, method="isotonic", cv=cv)
+        cal.fit(X_train, y_train)
+        base_model = cal
+    else:
+        logreg.fit(X_train, y_train)
+        base_model = logreg
 
     # LightGBM (if available)
     lgbm_model = None
@@ -120,8 +135,12 @@ def train_and_save(
                 ("clf", lgbm_model),
             ]
         )
-        lgbm_cal = CalibratedClassifierCV(lgbm_pipe, method="isotonic", cv=3)
-        lgbm_cal.fit(X_train, y_train)
+        if cv >= 2:
+            lgbm_cal = CalibratedClassifierCV(lgbm_pipe, method="isotonic", cv=cv)
+            lgbm_cal.fit(X_train, y_train)
+        else:
+            lgbm_pipe.fit(X_train, y_train)
+            lgbm_cal = lgbm_pipe
     except Exception:
         lgbm_cal = None
 
@@ -163,8 +182,8 @@ def train_and_save(
         }
         return tm, extra, proba
 
-    m_log, extra_log, proba_log = eval_model(cal)
-    best = ("logreg", cal, m_log, extra_log, proba_log)
+    m_log, extra_log, proba_log = eval_model(base_model)
+    best = ("logreg", base_model, m_log, extra_log, proba_log)
     if lgbm_cal is not None:
         m_lgb, extra_lgb, proba_lgb = eval_model(lgbm_cal)
         # choose by AUC when available, otherwise accuracy
