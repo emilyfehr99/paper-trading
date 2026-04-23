@@ -2,7 +2,7 @@
 # Schedule: every 15 min on weekdays, UTC hours that overlap RTH; a gate skips outside TRADE_*.
 # workflow_dispatch always runs the tick (for testing).
 #
-# Optional repo Variables: GHA_MARKET_TRADE_START, GHA_MARKET_TRADE_END (HH:MM, default 9:35 / 15:50).
+# Optional repo Variables: GHA_MARKET_TRADE_START, GHA_MARKET_TRADE_END (HH:MM, default 9:35 / 15:59).
 
 name: Paper scheduled tick
 
@@ -45,7 +45,7 @@ jobs:
               out = "true"
           else:
               start_s = (os.environ.get("MARKET_TRADE_START") or "").strip() or "9:35"
-              end_s = (os.environ.get("MARKET_TRADE_END") or "").strip() or "15:50"
+              end_s = (os.environ.get("MARKET_TRADE_END") or "").strip() or "15:59"
               start = parse_hm(start_s)
               end = parse_hm(end_s)
               ny = ZoneInfo("America/New_York")
@@ -124,9 +124,8 @@ jobs:
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"
           # More aggressive risk + frequency (paper only)
-          # Set caps to "unlimited" for paper (0 disables in code); keep sizing via RISK_PER_TRADE_PCT.
-          MAX_POSITIONS: "0"
-          MAX_TRADES_PER_DAY: "0"
+          MAX_POSITIONS: "25"
+          MAX_TRADES_PER_DAY: "200"
           MAX_GROSS_EXPOSURE_PCT: "0"
           MAX_DAILY_LOSS_PCT: "0"
           # Hard per-trade spend cap
