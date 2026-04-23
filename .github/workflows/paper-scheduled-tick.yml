@@ -82,8 +82,10 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: state
-          key: alpaca-paper-state-${{ runner.os }}-${{ steps.nydate.outputs.d }}
+          # Cache keys are immutable; use a unique key per run and restore the newest via restore-keys.
+          key: alpaca-paper-state-${{ runner.os }}-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
           restore-keys: |
+            alpaca-paper-state-${{ runner.os }}-${{ steps.nydate.outputs.d }}-
             alpaca-paper-state-${{ runner.os }}-ml-${{ steps.nydate.outputs.d }}-
             alpaca-paper-state-${{ runner.os }}-
 
