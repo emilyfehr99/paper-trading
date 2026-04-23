@@ -396,6 +396,10 @@ def _run_in_window_trading_cycle(
                 return
             base = (getattr(settings, "tvta_api_base_url", None) or "").strip()
             if not base:
+                try:
+                    log.warning("tvta_base_url_missing; set TVTA_API_BASE_URL to enable custom indicator API")
+                except Exception:
+                    pass
                 return
             prefix = str(getattr(settings, "tvta_symbol_prefix", "NYSE") or "NYSE")
             ti_dict = tvta_cache.get(sym)
