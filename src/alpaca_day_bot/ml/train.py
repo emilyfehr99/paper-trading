@@ -8,6 +8,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+from sklearn.dummy import DummyClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -89,6 +90,43 @@ def train_and_save(
         # If too small after embargo, fall back to no embargo.
         X_train, X_test = X.iloc[:cut], X.iloc[cut:]
         y_train, y_test = y.iloc[:cut], y.iloc[cut:]
+
+    # If training has only one class, fall back to a constant-probability baseline.
+    try:
+        yuniq = set(int(v) for v in list(y_train))
+    except Exception:
+        yuniq = set()
+    if len(yuniq) < 2:
+        const = int(list(yuniq)[0]) if yuniq else 0
+        dummy = DummyClassifier(strategy="constant", constant=const)
+        dummy.fit(X_train, y_train)
+        provider = "dummy"
+        model = dummy
+        metrics = TrainMetrics(
+            n=int(len(y_test)),
+            pos_rate=float(np.mean(y_test)) if len(y_test) else float(const),
+            auc=None,
+            acc=float(accuracy_score(y_test, (dummy.predict_proba(X_test)[:, 1] >= 0.5).astype(int)))
+            if len(y_test)
+            else 1.0,
+        )
+        outp = Path(out_path)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+            "db_path": db_path,
+            "min_horizon_minutes": float(min_horizon_minutes),
+            "provider": provider,
+            "metrics": asdict(metrics),
+            "extra_metrics": {},
+            "recommended_min_proba": 0.5,
+            "feature_columns": list(X.columns),
+            "rows_seen": int(len(meta)),
+            "explainability": None,
+        }
+        joblib.dump({"model": model, "meta": payload}, outp)
+        (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
 
     # Baseline calibrated logistic regression
     logreg = Pipeline(
