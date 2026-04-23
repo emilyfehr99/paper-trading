@@ -17,6 +17,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.ensemble import RandomForestClassifier
 
 from alpaca_day_bot.ml.dataset import build_signal_label_dataset
+from alpaca_day_bot.ml.executed_dataset import build_executed_trade_dataset
 
 
 @dataclass(frozen=True)
@@ -56,12 +57,26 @@ def train_and_save(
     min_horizon_minutes: float = 15.0,
     min_rows: int = 50,
 ) -> dict:
-    ds = build_signal_label_dataset(
-        db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=("BUY", "SHORT")
-    )
-    X = ds.X
-    y = ds.y
-    meta = ds.meta
+    # Prefer executed-trade dataset (real fills) when enough trades exist.
+    exec_ds = None
+    try:
+        exec_ds = build_executed_trade_dataset(db_path=db_path, min_trades=max(5, int(min_rows)))
+    except Exception:
+        exec_ds = None
+
+    ds_kind = "signals"
+    if exec_ds is not None:
+        X = exec_ds.X
+        y = exec_ds.y
+        meta = exec_ds.meta
+        ds_kind = "executed_trades"
+    else:
+        ds = build_signal_label_dataset(
+            db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=("BUY", "SHORT")
+        )
+        X = ds.X
+        y = ds.y
+        meta = ds.meta
 
     if len(X) < int(min_rows):
         # In early deployment we may have 0–few labeled rows. Treat this as a
@@ -76,6 +91,7 @@ def train_and_save(
             "skip_reason": "not_enough_labeled_rows",
             "n_labeled": int(len(X)),
             "min_required": int(min_rows),
+            "dataset_kind": ds_kind,
         }
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -343,6 +359,7 @@ def train_and_save(
         "db_path": db_path,
         "min_horizon_minutes": float(min_horizon_minutes),
         "provider": provider,
+        "dataset_kind": ds_kind,
         "metrics": asdict(metrics),
         "extra_metrics": extra_metrics,
         "recommended_min_proba": best_thr,

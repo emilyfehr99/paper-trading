@@ -10,6 +10,7 @@ from alpaca_day_bot.reporting.model_diagnostics import model_diagnostics_for_day
 from alpaca_day_bot.reporting.trades import realized_trade_stats_for_day
 from alpaca_day_bot.reporting.trade_why import trade_whys_for_day
 from alpaca_day_bot.reporting.virtual_options import virtual_options_stats_for_day
+from alpaca_day_bot.reporting.executed_ml import executed_ml_summary
 from alpaca_day_bot.ml.regime_thresholds import learn_regime_min_proba_map
 
 
@@ -151,6 +152,20 @@ def write_daily_report(
         f"- **Realized PnL (sum)**: {fmt_money(vopt.total_pnl_usd)}",
     ]
 
+    exec_sum = executed_ml_summary(db_path)
+    exec_lines = [
+        "",
+        "### Executed-trade learning (fills → FIFO round trips)",
+    ]
+    if exec_sum is None:
+        exec_lines.append("- Not enough executed round trips yet to train/evaluate.")
+    else:
+        exec_lines.append(f"- **Round trips available**: {exec_sum.n}")
+        exec_lines.append(
+            f"- **Win rate**: {('n/a' if exec_sum.win_rate is None else f'{exec_sum.win_rate*100:.1f}%')}"
+        )
+        exec_lines.append(f"- **Total realized PnL**: {fmt_money(exec_sum.total_pnl)}")
+
     lines = [
         f"## Paper trading report: {day.isoformat()}",
         "",
@@ -164,6 +179,7 @@ def write_daily_report(
         *acc_lines,
         *model_lines,
         *trade_lines,
+        *exec_lines,
         *vopt_lines,
         "",
         "### Regime threshold suggestions (learned from ledger)",
