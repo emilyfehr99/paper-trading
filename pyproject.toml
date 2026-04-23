@@ -2,7 +2,7 @@
 name = "alpaca-paper-day-bot"
 version = "0.1.0"
 description = "Local-only Alpaca paper day-trading bot (1-week mock run)."
-requires-python = ">=3.10"
+requires-python = ">=3.10,<4.0"
 dependencies = [
   "alpaca-py>=0.42.0",
   "numpy>=1.26",
