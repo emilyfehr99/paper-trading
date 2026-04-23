@@ -145,6 +145,15 @@ jobs:
           SIGNAL_ACCURACY_MIN_AGE_MINUTES: "0"
         run: python -m alpaca_day_bot --scheduled-tick
 
+      - name: Train/update ML model (from latest labels)
+        if: always()
+        run: |
+          python -m alpaca_day_bot.ml.train \
+            --db state/ledger.sqlite3 \
+            --out state/models/latest.joblib \
+            --min-horizon-minutes 15 \
+            --min-rows 2
+
       - name: Upload state artifact (debug / backup)
         if: always()
         uses: actions/upload-artifact@v4
