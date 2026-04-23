@@ -47,7 +47,13 @@ def _precision_at_k(y_true, y_score, k_frac: float) -> float | None:
         return None
 
 
-def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 15.0) -> dict:
+def train_and_save(
+    *,
+    db_path: str,
+    out_path: str,
+    min_horizon_minutes: float = 15.0,
+    min_rows: int = 50,
+) -> dict:
     ds = build_signal_label_dataset(
         db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=("BUY", "SHORT")
     )
@@ -55,7 +61,7 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
     y = ds.y
     meta = ds.meta
 
-    if len(X) < 50:
+    if len(X) < int(min_rows):
         # In early deployment we may have 0–few labeled rows. Treat this as a
         # successful no-op so scheduled training doesn't fail the workflow.
         outp = Path(out_path)
@@ -67,7 +73,7 @@ def train_and_save(*, db_path: str, out_path: str, min_horizon_minutes: float = 
             "skipped": True,
             "skip_reason": "not_enough_labeled_rows",
             "n_labeled": int(len(X)),
-            "min_required": 50,
+            "min_required": int(min_rows),
         }
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -240,9 +246,15 @@ def main() -> None:
     ap.add_argument("--db", required=True, help="Path to ledger.sqlite3")
     ap.add_argument("--out", required=True, help="Output model artifact path (joblib)")
     ap.add_argument("--min-horizon-minutes", type=float, default=15.0)
+    ap.add_argument("--min-rows", type=int, default=50, help="Minimum labeled rows required to train")
     args = ap.parse_args()
 
-    meta = train_and_save(db_path=args.db, out_path=args.out, min_horizon_minutes=float(args.min_horizon_minutes))
+    meta = train_and_save(
+        db_path=args.db,
+        out_path=args.out,
+        min_horizon_minutes=float(args.min_horizon_minutes),
+        min_rows=int(args.min_rows),
+    )
     print(json.dumps(meta, indent=2))
 
 

@@ -45,7 +45,8 @@ jobs:
           python -m alpaca_day_bot.ml.train \
             --db state/ledger.sqlite3 \
             --out state/models/latest.joblib \
-            --min-horizon-minutes 15
+            --min-horizon-minutes 15 \
+            --min-rows 10
 
       - name: Upload model artifact
         if: always()

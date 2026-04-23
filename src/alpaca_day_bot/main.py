@@ -258,9 +258,18 @@ def _label_signals_triple_barrier(
             import pandas as pd
 
             dfx = df.copy()
-            dfx.index = pd.to_datetime(dfx.index, utc=True)
+            dfx.index = pd.to_datetime(dfx.index, utc=True, errors="coerce")
             dfx = dfx.sort_index()
-            dfx = dfx[dfx.index >= ts_sig]
+            dfx_full = dfx
+            # Some data sources/buffers can yield indices that don't compare cleanly to ts_sig
+            # (or bars may not extend back far enough). If the filter removes everything,
+            # fall back to the full snapshot so we still produce labels.
+            try:
+                dfx = dfx[dfx.index >= ts_sig]
+                if dfx is None or getattr(dfx, "empty", True):
+                    dfx = dfx_full
+            except Exception:
+                dfx = dfx_full
         except Exception:
             continue
         if dfx is None or getattr(dfx, "empty", True):
