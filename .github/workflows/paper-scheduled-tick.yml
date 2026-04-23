@@ -114,10 +114,10 @@ jobs:
           # News (combo = Alpha Vantage + no-key feeds)
           NEWS_PROVIDER: "combo"
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
-          # Indicators (TAAPI confirmation layer; add TAAPI_SECRET in repo secrets to enable)
-          INDICATOR_PROVIDER: "taapi"
-          TAAPI_SECRET: ${{ secrets.TAAPI_SECRET }}
-          TAAPI_CONFIRM_ON_TRADE: "true"
+          # Indicators (your TV TA API)
+          INDICATOR_PROVIDER: "tvta"
+          TVTA_API_BASE_URL: ${{ secrets.TVTA_API_BASE_URL }}
+          TVTA_SYMBOL_PREFIX: "NYSE"
           # ML model layer (optional; uses state/models/latest.joblib if present)
           MODEL_ENABLED: "true"
           UNIVERSE_ENABLED: "true"
