@@ -141,6 +141,8 @@ jobs:
           RSI_PULLBACK_MAX: "55"
           RSI_REBOUND_MIN_SHORT: "50"
           VOLUME_CONFIRM_MULT: "0.8"
+          # Label immediately so ML can start training sooner (paper only).
+          SIGNAL_ACCURACY_MIN_AGE_MINUTES: "0"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Upload state artifact (debug / backup)
