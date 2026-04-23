@@ -214,6 +214,18 @@ class V1RulesSignalEngine(BaseStrategy):
         import pandas as pd
         import pandas_ta as ta
 
+        def _daily_vwap_utc(dfx: pd.DataFrame) -> pd.Series:
+            """
+            Daily-reset VWAP anchored to midnight UTC ("anchor='D'").
+            """
+            tp = (dfx["high"].astype(float) + dfx["low"].astype(float) + dfx["close"].astype(float)) / 3.0
+            pv = tp * dfx["volume"].astype(float)
+            # Reset at midnight (UTC) by grouping on date from a UTC index.
+            d = pd.to_datetime(dfx.index, utc=True).date
+            cum_pv = pv.groupby(d).cumsum()
+            cum_v = dfx["volume"].astype(float).groupby(d).cumsum()
+            return (cum_pv / cum_v).replace([float("inf"), float("-inf")], float("nan"))
+
         df = df_1m.copy()
         # pandas-ta VWAP requires an ordered DatetimeIndex; enforce monotonic UTC index.
         try:
@@ -230,18 +242,26 @@ class V1RulesSignalEngine(BaseStrategy):
 
         # Indicators (1m)
         df["ema_20"] = ta.ema(df["close"], length=int(self._ema_trend_len))
+        df["ema_9"] = ta.ema(df["close"], length=9)
+        df["ema_21"] = ta.ema(df["close"], length=21)
         df["rsi"] = ta.rsi(df["close"], length=14)
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
         if macd is not None:
             df = pd.concat([df, macd], axis=1)
-        df["vwap_calc"] = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
+        df["vwap_calc"] = _daily_vwap_utc(df)
         df["volume_sma"] = df["volume"].rolling(int(self._volume_sma_len)).mean()
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(self._atr_len))
         df["atr_avg"] = df["atr"].rolling(int(self._atr_regime_lookback)).mean()
 
         last = df.iloc[-1]
         # Guard against NaNs from warmup
-        if pd.isna(last.get("rsi")) or pd.isna(last.get("ema_20")) or pd.isna(last.get("vwap_calc")):
+        if (
+            pd.isna(last.get("rsi"))
+            or pd.isna(last.get("ema_20"))
+            or pd.isna(last.get("vwap_calc"))
+            or pd.isna(last.get("ema_9"))
+            or pd.isna(last.get("ema_21"))
+        ):
             return None
 
         # Higher timeframe bias: 15m RSI must be > threshold (longs) or < max threshold (shorts)
@@ -297,6 +317,13 @@ class V1RulesSignalEngine(BaseStrategy):
             "close": float(last["close"]),
             "rsi_14": float(last["rsi"]),
             "ema": float(last["ema_20"]),
+            "ema_9": (None if pd.isna(last.get("ema_9")) else float(last.get("ema_9"))),
+            "ema_21": (None if pd.isna(last.get("ema_21")) else float(last.get("ema_21"))),
+            "ema_9_21_bias": (
+                None
+                if (pd.isna(last.get("ema_9")) or pd.isna(last.get("ema_21")))
+                else (1.0 if float(last.get("ema_9")) >= float(last.get("ema_21")) else 0.0)
+            ),
             "macd": (None if pd.isna(macd_now) else float(macd_now)),
             "macd_signal": (None if pd.isna(macds_now) else float(macds_now)),
             "vwap": float(last["vwap_calc"]),
