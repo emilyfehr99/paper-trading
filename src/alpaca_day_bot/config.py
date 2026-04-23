@@ -180,6 +180,13 @@ class Settings(BaseSettings):
     # Synthetic exits: submit entry without bracket, then attach OCO TP/SL as separate orders.
     synthetic_exits_enabled: bool = Field(default=False, alias="SYNTHETIC_EXITS_ENABLED")
 
+    # Virtual options (mock calls/puts; NOT sent to Alpaca)
+    sim_options_enabled: bool = Field(default=False, alias="SIM_OPTIONS_ENABLED")
+    # Risk: at worst you lose the notional (like long premium). Profit scales with leverage * underlying move.
+    sim_options_leverage: float = Field(default=6.0, alias="SIM_OPTIONS_LEVERAGE")
+    # If 0, reuses MAX_NOTIONAL_PER_TRADE_USD; otherwise per-virtual-option cap.
+    sim_options_notional_usd: float = Field(default=0.0, alias="SIM_OPTIONS_NOTIONAL_USD")
+
     def tzinfo(self) -> ZoneInfo:
         return ZoneInfo(self.market_tz)
 

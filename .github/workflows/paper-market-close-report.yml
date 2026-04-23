@@ -70,7 +70,9 @@ jobs:
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
-        run: python -m alpaca_day_bot --write-report
+        run: |
+          python -m alpaca_day_bot --close-virtual-options
+          python -m alpaca_day_bot --write-report
 
       - name: Upload reports artifact (daily/weekly)
         if: always()

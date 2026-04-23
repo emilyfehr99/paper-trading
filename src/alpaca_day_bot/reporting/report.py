@@ -9,6 +9,7 @@ from alpaca_day_bot.reporting.accuracy import forward_accuracy_for_calendar_day
 from alpaca_day_bot.reporting.model_diagnostics import model_diagnostics_for_day
 from alpaca_day_bot.reporting.trades import realized_trade_stats_for_day
 from alpaca_day_bot.reporting.trade_why import trade_whys_for_day
+from alpaca_day_bot.reporting.virtual_options import virtual_options_stats_for_day
 from alpaca_day_bot.ml.regime_thresholds import learn_regime_min_proba_map
 
 
@@ -142,6 +143,14 @@ def write_daily_report(
             "- No completed round trips yet in this calendar day.",
         ]
 
+    vopt = virtual_options_stats_for_day(db_path, day)
+    vopt_lines = [
+        "",
+        "### Virtual options (simulated calls/puts)",
+        f"- **Closed virtual option trades**: {vopt.n_closed}",
+        f"- **Realized PnL (sum)**: {fmt_money(vopt.total_pnl_usd)}",
+    ]
+
     lines = [
         f"## Paper trading report: {day.isoformat()}",
         "",
@@ -155,6 +164,7 @@ def write_daily_report(
         *acc_lines,
         *model_lines,
         *trade_lines,
+        *vopt_lines,
         "",
         "### Regime threshold suggestions (learned from ledger)",
         *(_regime_threshold_lines(db_path)),

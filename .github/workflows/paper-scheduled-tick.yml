@@ -123,6 +123,10 @@ jobs:
           UNIVERSE_ENABLED: "true"
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"
+          # Virtual options (simulated calls/puts; not sent to Alpaca)
+          SIM_OPTIONS_ENABLED: "true"
+          SIM_OPTIONS_LEVERAGE: "6"
+          SIM_OPTIONS_NOTIONAL_USD: "50"
           # More aggressive risk + frequency (paper only)
           MAX_POSITIONS: "25"
           MAX_TRADES_PER_DAY: "200"

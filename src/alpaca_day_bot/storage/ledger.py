@@ -96,6 +96,20 @@ class Ledger:
               horizon_minutes REAL NOT NULL,
               FOREIGN KEY (signal_id) REFERENCES signals(id)
             );
+
+            CREATE TABLE IF NOT EXISTS virtual_option_trades (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts_open TEXT NOT NULL,
+              ts_close TEXT,
+              symbol TEXT NOT NULL,
+              side TEXT NOT NULL, -- call | put
+              notional_usd REAL NOT NULL,
+              leverage REAL NOT NULL,
+              underlying_entry REAL NOT NULL,
+              underlying_exit REAL,
+              pnl_usd REAL,
+              meta_json TEXT
+            );
             """
             )
             self._conn.commit()
@@ -306,6 +320,110 @@ class Ledger:
             )
             self._conn.commit()
             return int(cur.lastrowid)
+
+    def open_virtual_option_trade(
+        self,
+        *,
+        ts_open: datetime,
+        symbol: str,
+        side: str,
+        notional_usd: float,
+        leverage: float,
+        underlying_entry: float,
+        meta: dict[str, Any] | None = None,
+    ) -> int:
+        side_n = (side or "").strip().lower()
+        if side_n not in ("call", "put"):
+            side_n = "call"
+        row = {
+            "ts_open": ts_open.isoformat(),
+            "symbol": symbol,
+            "side": side_n,
+            "notional_usd": float(notional_usd),
+            "leverage": float(leverage),
+            "underlying_entry": float(underlying_entry),
+            "meta": meta or {},
+        }
+        with self._lock:
+            cur = self._conn.execute(
+                """
+            INSERT INTO virtual_option_trades
+              (ts_open, ts_close, symbol, side, notional_usd, leverage, underlying_entry, underlying_exit, pnl_usd, meta_json)
+            VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                """,
+                (
+                    ts_open.isoformat(),
+                    symbol,
+                    side_n,
+                    float(notional_usd),
+                    float(leverage),
+                    float(underlying_entry),
+                    json.dumps(row, default=str),
+                ),
+            )
+            self._conn.commit()
+            tid = int(cur.lastrowid)
+        self.append_audit_line({"kind": "virtual_option_open", "id": tid, **row})
+        return tid
+
+    def list_open_virtual_option_trades(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+            SELECT id, ts_open, symbol, side, notional_usd, leverage, underlying_entry, meta_json
+            FROM virtual_option_trades
+            WHERE ts_close IS NULL
+            ORDER BY ts_open ASC
+                """
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for rid, ts_open, sym, side, notional, lev, uentry, meta_json in rows:
+            meta = {}
+            try:
+                meta = json.loads(meta_json) if meta_json else {}
+            except Exception:
+                meta = {}
+            out.append(
+                {
+                    "id": int(rid),
+                    "ts_open": str(ts_open),
+                    "symbol": str(sym),
+                    "side": str(side),
+                    "notional_usd": float(notional),
+                    "leverage": float(lev),
+                    "underlying_entry": float(uentry),
+                    "meta": meta,
+                }
+            )
+        return out
+
+    def close_virtual_option_trade(
+        self,
+        *,
+        trade_id: int,
+        ts_close: datetime,
+        underlying_exit: float,
+        pnl_usd: float,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+            UPDATE virtual_option_trades
+            SET ts_close = ?, underlying_exit = ?, pnl_usd = ?
+            WHERE id = ?
+                """,
+                (ts_close.isoformat(), float(underlying_exit), float(pnl_usd), int(trade_id)),
+            )
+            self._conn.commit()
+        self.append_audit_line(
+            {
+                "kind": "virtual_option_close",
+                "id": int(trade_id),
+                "ts_close": ts_close.isoformat(),
+                "underlying_exit": float(underlying_exit),
+                "pnl_usd": float(pnl_usd),
+            }
+        )
 
     def list_unlabeled_buy_signal_rows(
         self,

@@ -20,6 +20,7 @@ from alpaca_day_bot.data.stream import BarBuffer, MarketDataStreamer
 from alpaca_day_bot.logging_utils import setup_json_logging
 from alpaca_day_bot.ml.infer import load_model as _load_ml_model, predict_proba as _ml_predict_proba
 from alpaca_day_bot.ml.regime_thresholds import learn_regime_min_proba_map, write_regime_thresholds_json
+from alpaca_day_bot.options_sim import close_open_virtual_options
 from alpaca_day_bot.reporting.report import write_daily_report, write_weekly_report
 from alpaca_day_bot.risk.manager import RiskManager, now_utc
 from alpaca_day_bot.storage.ledger import Ledger
@@ -975,6 +976,27 @@ def _run_in_window_trading_cycle(
         )
         if res.submitted:
             risk.register_trade(sym, t0)
+
+            # Optional: simulate an options "call/put" trade (virtual; never sent to Alpaca).
+            try:
+                if bool(getattr(settings, "sim_options_enabled", False)):
+                    side_opt = "call" if action == "BUY" else "put"
+                    max_cap = float(getattr(settings, "max_notional_per_trade_usd", 0.0) or 0.0)
+                    opt_cap = float(getattr(settings, "sim_options_notional_usd", 0.0) or 0.0)
+                    notional = opt_cap if opt_cap > 0 else max_cap
+                    if notional and notional > 0 and last_close > 0:
+                        ledger.open_virtual_option_trade(
+                            ts_open=t0,
+                            symbol=sym,
+                            side=side_opt,
+                            notional_usd=float(notional),
+                            leverage=float(getattr(settings, "sim_options_leverage", 6.0) or 6.0),
+                            underlying_entry=float(last_close),
+                            meta={"source": "scheduled_tick", "linked_action": action},
+                        )
+            except Exception:
+                pass
+
             # Refresh risk state after opening a position
             equity = executor.get_account_equity()
             gross = executor.gross_exposure_usd()
@@ -1268,6 +1290,11 @@ def cli() -> None:
         action="store_true",
         help="Write daily+weekly report for the current market day and exit (no trading).",
     )
+    p.add_argument(
+        "--close-virtual-options",
+        action="store_true",
+        help="Close any open simulated call/put trades (virtual options) and exit.",
+    )
     args = p.parse_args()
     run(
         observe_only_override=bool(args.observe_only),
@@ -1277,6 +1304,7 @@ def cli() -> None:
         robustness=bool(args.robustness),
         build_universe=bool(args.build_universe),
         write_report=bool(args.write_report),
+        close_virtual_options=bool(args.close_virtual_options),
         start=args.start,
         end=args.end,
     )
@@ -1291,6 +1319,7 @@ def run(
     robustness: bool,
     build_universe: bool = False,
     write_report: bool = False,
+    close_virtual_options: bool = False,
     start: str | None,
     end: str | None,
 ) -> None:
@@ -1342,6 +1371,21 @@ def run(
 
     db_path = str(state_dir / "ledger.sqlite3")
     ledger = Ledger(db_path)
+
+    if close_virtual_options:
+        try:
+            res = close_open_virtual_options(
+                ledger=ledger,
+                apca_api_key_id=settings.apca_api_key_id,
+                apca_api_secret_key=settings.apca_api_secret_key,
+                ts_close=now_utc(),
+            )
+            log.info("virtual_options_closed", extra={"extra_json": res})
+        except Exception as e:
+            log.warning("virtual_options_close_failed err=%s", e, exc_info=True)
+        finally:
+            ledger.close()
+        return
 
     if write_report:
         market_now = now_utc().astimezone(settings.tzinfo())
