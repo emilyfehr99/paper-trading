@@ -35,6 +35,7 @@ jobs:
           key: alpaca-paper-state-${{ runner.os }}-ml-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
           restore-keys: |
             alpaca-paper-state-${{ runner.os }}-ml-${{ steps.nydate.outputs.d }}-
+            alpaca-paper-state-${{ runner.os }}-${{ steps.nydate.outputs.d }}-
             alpaca-paper-state-${{ runner.os }}-
 
       - name: Install package
