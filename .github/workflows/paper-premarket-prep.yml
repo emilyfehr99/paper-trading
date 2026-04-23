@@ -79,6 +79,44 @@ jobs:
           UNIVERSE_MAX_PRICE: "50"
         run: python -m alpaca_day_bot --build-universe
 
+      - name: Warm up tv-ta-api (Render cold start)
+        env:
+          TVTA_API_BASE_URL: ${{ secrets.TVTA_API_BASE_URL }}
+        run: |
+          python3 << 'PY'
+          import json, os, time, urllib.request
+          base = (os.environ.get("TVTA_API_BASE_URL") or "").strip().rstrip("/")
+          if not base:
+            raise SystemExit("missing TVTA_API_BASE_URL")
+          urls = [f"{base}/health", f"{base}/api/ta/batch"]
+          # First call wakes the service; second primes indicator path.
+          for u in urls:
+            for attempt in range(4):
+              try:
+                if u.endswith("/health"):
+                  with urllib.request.urlopen(u, timeout=20) as resp:
+                    body = resp.read().decode("utf-8", "ignore")[:200]
+                    print("health", resp.status, body)
+                else:
+                  payload = json.dumps(
+                    {"resolution":"1D","items":[{"symbol":"NASDAQ:AAPL","indicators":["rsi:14","macd"]}]}
+                  ).encode("utf-8")
+                  req = urllib.request.Request(
+                    u,
+                    data=payload,
+                    headers={"Content-Type":"application/json","Accept":"application/json"},
+                    method="POST",
+                  )
+                  with urllib.request.urlopen(req, timeout=25) as resp:
+                    body = resp.read().decode("utf-8", "ignore")[:300]
+                    print("batch", resp.status, body)
+                break
+              except Exception as e:
+                wait = 1.0 * (2**attempt)
+                print("warmup_failed", u, "attempt", attempt+1, "err", str(e), "sleep", wait)
+                time.sleep(wait)
+          PY
+
       - name: Premarket scan (observe-only; no orders)
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}

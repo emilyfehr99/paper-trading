@@ -186,6 +186,8 @@ class Settings(BaseSettings):
     sim_options_leverage: float = Field(default=6.0, alias="SIM_OPTIONS_LEVERAGE")
     # If 0, reuses MAX_NOTIONAL_PER_TRADE_USD; otherwise per-virtual-option cap.
     sim_options_notional_usd: float = Field(default=0.0, alias="SIM_OPTIONS_NOTIONAL_USD")
+    # Theta decay model for virtual options (fraction of notional lost per day held).
+    sim_options_theta_decay_per_day: float = Field(default=0.001, alias="SIM_OPTIONS_THETA_DECAY_PER_DAY")
 
     def tzinfo(self) -> ZoneInfo:
         return ZoneInfo(self.market_tz)

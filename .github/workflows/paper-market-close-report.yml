@@ -55,8 +55,10 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: state
-          key: alpaca-paper-state-${{ runner.os }}-${{ needs.gate.outputs.day }}
+          key: alpaca-paper-state-${{ runner.os }}-${{ needs.gate.outputs.day }}-${{ github.run_id }}
           restore-keys: |
+            alpaca-paper-state-${{ runner.os }}-${{ needs.gate.outputs.day }}-
+            alpaca-paper-state-${{ runner.os }}-ml-${{ needs.gate.outputs.day }}-
             alpaca-paper-state-${{ runner.os }}-
 
       - uses: actions/setup-python@v5
@@ -70,6 +72,8 @@ jobs:
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          # Report timestamps in your local time (Winnipeg)
+          MARKET_TZ: "America/Winnipeg"
         run: |
           python -m alpaca_day_bot --close-virtual-options
           python -m alpaca_day_bot --write-report

@@ -15,21 +15,33 @@ def _pnl_virtual_long_option(
     leverage: float,
     underlying_entry: float,
     underlying_exit: float,
+    strike: float | None = None,
+    theta_decay_per_day: float = 0.001,
+    days_held: float = 1.0,
 ) -> float:
     """
-    Very simple mock model:
-    - Treat the option like a leveraged long/short on the underlying.
+    Simple, more realistic mock model:
+    - Set strike K ~ entry price (ATM proxy) unless provided.
+    - Value at close ~ intrinsic-only payout (S-K for call; K-S for put), scaled by leverage.
+    - Apply theta decay to the premium while held.
     - Loss is capped at -notional (like long premium).
-    - Profit is unbounded (linear) for simplicity.
     """
-    if underlying_entry <= 0:
+    if underlying_entry <= 0 or notional_usd <= 0:
         return 0.0
-    ret = (underlying_exit - underlying_entry) / underlying_entry
     s = (side or "").strip().lower()
-    if s == "put":
-        ret = -ret
-    pnl = float(notional_usd) * float(leverage) * float(ret)
-    return max(-float(notional_usd), pnl)
+    k = float(strike) if (strike is not None and float(strike) > 0) else float(underlying_entry)
+    intrinsic = max(0.0, float(underlying_exit) - k) if s != "put" else max(0.0, k - float(underlying_exit))
+    intrinsic_pct = intrinsic / float(underlying_entry) if float(underlying_entry) > 0 else 0.0
+
+    # Premium after theta decay.
+    d = max(0.0, float(days_held))
+    td = max(0.0, float(theta_decay_per_day))
+    premium = float(notional_usd) * max(0.0, 1.0 - td * d)
+
+    # Payoff proxy: premium * leverage * intrinsic% (intrinsic-only approximation).
+    value_at_close = premium * float(leverage) * float(intrinsic_pct)
+    pnl = value_at_close - float(notional_usd)
+    return max(-float(notional_usd), float(pnl))
 
 
 def close_open_virtual_options(
@@ -99,12 +111,38 @@ def close_open_virtual_options(
         px = closes.get(sym)
         if px is None or px <= 0:
             continue
+        # derive decay params
+        meta = r.get("meta") if isinstance(r.get("meta"), dict) else {}
+        strike = None
+        theta = 0.001
+        try:
+            if isinstance(meta, dict):
+                if meta.get("strike") is not None:
+                    strike = float(meta.get("strike"))
+                if meta.get("theta_decay_per_day") is not None:
+                    theta = float(meta.get("theta_decay_per_day"))
+        except Exception:
+            strike = None
+            theta = 0.001
+        # days held based on timestamp string
+        days_held = 1.0
+        try:
+            ts_open = datetime.fromisoformat(str(r.get("ts_open")).replace("Z", "+00:00"))
+            if ts_open.tzinfo is None:
+                ts_open = ts_open.replace(tzinfo=timezone.utc)
+            days_held = max(0.0, (now - ts_open).total_seconds() / (24.0 * 3600.0))
+        except Exception:
+            days_held = 1.0
+
         pnl = _pnl_virtual_long_option(
             side=str(r.get("side") or "call"),
             notional_usd=float(r.get("notional_usd") or 0.0),
             leverage=float(r.get("leverage") or 1.0),
             underlying_entry=float(r.get("underlying_entry") or 0.0),
             underlying_exit=float(px),
+            strike=strike,
+            theta_decay_per_day=theta,
+            days_held=days_held,
         )
         ledger.close_virtual_option_trade(
             trade_id=int(r["id"]),

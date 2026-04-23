@@ -992,7 +992,14 @@ def _run_in_window_trading_cycle(
                             notional_usd=float(notional),
                             leverage=float(getattr(settings, "sim_options_leverage", 6.0) or 6.0),
                             underlying_entry=float(last_close),
-                            meta={"source": "scheduled_tick", "linked_action": action},
+                            meta={
+                                "source": "scheduled_tick",
+                                "linked_action": action,
+                                "strike": float(last_close),  # simple ATM strike proxy
+                                "theta_decay_per_day": float(
+                                    getattr(settings, "sim_options_theta_decay_per_day", 0.001) or 0.001
+                                ),
+                            },
                         )
             except Exception:
                 pass
