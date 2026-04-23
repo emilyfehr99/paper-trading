@@ -152,7 +152,7 @@ jobs:
             --db state/ledger.sqlite3 \
             --out state/models/latest.joblib \
             --min-horizon-minutes 15 \
-            --min-rows 2
+            --min-rows 1
 
       - name: Upload state artifact (debug / backup)
         if: always()
