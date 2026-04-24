@@ -1638,6 +1638,9 @@ def run(
         daily_profit_target_usd=settings.daily_profit_target_usd,
     )
     # Two strategy instances: conservative always; aggressive used only in good regimes.
+    #
+    # NOTE: Several helper functions reference these by name; bind them at module scope.
+    global strategy_cons, strategy_aggr
     strategy_cons = V1RulesSignalEngine(
         rsi_pullback_max=settings.rsi_pullback_max,
         volume_confirm_mult=settings.volume_confirm_mult,
