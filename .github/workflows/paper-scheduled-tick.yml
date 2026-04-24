@@ -147,7 +147,7 @@ jobs:
           MAX_GROSS_EXPOSURE_PCT: "0"
           MAX_DAILY_LOSS_PCT: "0.01"
           # Hard per-trade spend cap
-          MAX_NOTIONAL_PER_TRADE_USD: "50"
+          MAX_NOTIONAL_PER_TRADE_USD: "100"
           RISK_PER_TRADE_PCT: "0.01"
           PER_SYMBOL_COOLDOWN_S: "60"
           # Keep whole-share sizing compatible with the per-trade cap
