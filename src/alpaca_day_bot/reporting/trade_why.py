@@ -46,8 +46,11 @@ def _parse_features(features_json: str | None) -> dict[str, Any]:
 
 def trade_whys_for_day(db_path: str, day_utc: str) -> list[TradeWhyRow]:
     """
-    For each submitted order intent, find the most recent signal for that symbol within a short window
-    and extract 'why' fields from signal features.
+    For each submitted *ENTRY* order intent (buy/sell), find the most recent signal for that symbol
+    at/just before intent time and extract 'why' fields from signal features.
+
+    Note: exits (side='close') are intentionally excluded so the "Trades (why this fired)" section
+    doesn't get spammed by flatten/time-exit batches. Exits are reported separately.
     """
     start = f"{day_utc}T00:00:00+00:00"
     end = f"{day_utc}T23:59:59+00:00"
@@ -57,7 +60,9 @@ def trade_whys_for_day(db_path: str, day_utc: str) -> list[TradeWhyRow]:
         """
         SELECT ts, symbol, side, raw_json
         FROM order_intents
-        WHERE submitted=1 AND ts BETWEEN ? AND ?
+        WHERE submitted=1
+          AND LOWER(side) IN ('buy','sell')
+          AND ts BETWEEN ? AND ?
         ORDER BY ts ASC
         """,
         (start, end),
@@ -162,5 +167,31 @@ def trade_whys_for_day(db_path: str, day_utc: str) -> list[TradeWhyRow]:
         )
 
     conn.close()
+    return out
+
+
+def exit_intents_for_day(db_path: str, day_utc: str) -> list[tuple[str, str, str, str]]:
+    """
+    Return submitted exit intents (side='close') for the day as (ts, symbol, reason, raw_json).
+    Used to summarize exit attempts without mixing them into entry reasoning.
+    """
+    start = f"{day_utc}T00:00:00+00:00"
+    end = f"{day_utc}T23:59:59+00:00"
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        """
+        SELECT ts, symbol, reason, raw_json
+        FROM order_intents
+        WHERE submitted=1
+          AND LOWER(side)='close'
+          AND ts BETWEEN ? AND ?
+        ORDER BY ts ASC
+        """,
+        (start, end),
+    ).fetchall()
+    conn.close()
+    out: list[tuple[str, str, str, str]] = []
+    for ts, sym, reason, raw in rows:
+        out.append((str(ts), str(sym), str(reason), str(raw or "")))
     return out
 

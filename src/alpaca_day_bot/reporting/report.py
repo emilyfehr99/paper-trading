@@ -8,7 +8,7 @@ from pathlib import Path
 from alpaca_day_bot.reporting.accuracy import forward_accuracy_for_calendar_day
 from alpaca_day_bot.reporting.model_diagnostics import model_diagnostics_for_day, model_diagnostics_for_day_by_action
 from alpaca_day_bot.reporting.trades import realized_trade_stats_for_day
-from alpaca_day_bot.reporting.trade_why import trade_whys_for_day
+from alpaca_day_bot.reporting.trade_why import exit_intents_for_day, trade_whys_for_day
 from alpaca_day_bot.reporting.virtual_options import virtual_options_stats_for_day
 from alpaca_day_bot.reporting.executed_ml import executed_ml_summary
 from alpaca_day_bot.ml.regime_thresholds import learn_regime_min_proba_map
@@ -255,6 +255,9 @@ def write_daily_report(
         "### Trades (why this fired)",
         *(_trade_why_lines(db_path, day)),
         "",
+        "### Exits (submitted closes)",
+        *(_exit_intent_lines(db_path, day)),
+        "",
         "Notes:",
         "- Equity snapshots are taken periodically during runtime.",
         "- Weekly summaries are written separately as `week_ending_YYYY-MM-DD.md`.",
@@ -281,7 +284,7 @@ def _regime_threshold_lines(db_path: str) -> list[str]:
 def _trade_why_lines(db_path: str, day: date) -> list[str]:
     rows = trade_whys_for_day(db_path, day.isoformat())
     if not rows:
-        return ["- No submitted orders recorded for this calendar day."]
+        return ["- No submitted entry orders recorded for this calendar day."]
     out: list[str] = []
     for r in rows:
         qty = "n/a" if r.qty is None else str(int(r.qty))
@@ -310,6 +313,21 @@ def _trade_why_lines(db_path: str, day: date) -> list[str]:
             f"news_n={nn} taapi={tp} ind_provider={ip}{inds}{rv}"
         )
     return out
+
+
+def _exit_intent_lines(db_path: str, day: date) -> list[str]:
+    rows = exit_intents_for_day(db_path, day.isoformat())
+    if not rows:
+        return ["- No submitted exit orders recorded for this calendar day."]
+    # Keep this concise; exits can be batchy (flatten/time exits).
+    syms = [s for _ts, s, _reason, _raw in rows if s]
+    uniq = []
+    for s in syms:
+        if s not in uniq:
+            uniq.append(s)
+    top = ", ".join(uniq[:15])
+    more = "" if len(uniq) <= 15 else f" (+{len(uniq)-15} more)"
+    return [f"- **Exit intents submitted**: {len(rows)} (symbols: {top}{more})"]
 
 
 def write_weekly_report(db_path: str, reports_dir: str, week_ending: date, days: int = 7) -> str:
