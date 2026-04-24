@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 @dataclass(frozen=True)
 class ForwardAccuracySummary:
-    """Directional hit rate for BUY signals once forward-return labels exist."""
+    """Directional hit rate for signals once forward-return labels exist."""
 
     labeled_count: int
     directional_hits: int
@@ -22,15 +22,17 @@ def forward_accuracy_for_calendar_day(
     day: date,
     *,
     market_tz: str,
+    actions: tuple[str, ...] = ("BUY",),
 ) -> ForwardAccuracySummary | None:
     """
-    Labels are joined to signals where the BUY occurred on `day` in `market_tz`.
+    Labels are joined to signals where the action occurred on `day` in `market_tz`.
     This measures close→close proxy accuracy at label time, not bracket fill outcomes.
     """
     tz = ZoneInfo(market_tz)
     start = datetime.combine(day, time(0, 0, 0), tzinfo=tz).astimezone(timezone.utc)
     end = start + timedelta(days=1)
     start_s, end_s = start.isoformat(), end.isoformat()
+    acts = tuple(str(a).upper() for a in actions)
 
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
@@ -38,10 +40,10 @@ def forward_accuracy_for_calendar_day(
         SELECT f.return_pct
         FROM forward_return_labels f
         JOIN signals s ON s.id = f.signal_id
-        WHERE s.action = 'BUY'
+        WHERE s.action IN ({acts})
           AND s.ts >= ? AND s.ts < ?
-        """,
-        (start_s, end_s),
+        """.format(acts=",".join(["?"] * len(acts))),
+        (*acts, start_s, end_s),
     ).fetchall()
     conn.close()
 

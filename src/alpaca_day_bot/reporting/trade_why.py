@@ -16,9 +16,13 @@ class TradeWhyRow:
     action: str | None
     setup_reason: str | None
     model_proba: float | None
+    model_provider: str | None
     news_count: int | None
     news_sent_mean: float | None
     taapi_present: bool | None
+    indicator_provider: str | None
+    indicators_used: list[str] | None
+    rule_votes: dict[str, Any] | None
 
 
 def _safe_float(x: Any) -> float | None:
@@ -84,9 +88,13 @@ def trade_whys_for_day(db_path: str, day_utc: str) -> list[TradeWhyRow]:
 
         setup_reason = None
         model_proba = None
+        model_provider = None
         news_count = None
         news_sent_mean = None
         taapi_present = None
+        indicator_provider = None
+        indicators_used = None
+        rule_votes = None
         if sig:
             _sig_ts, sig_reason, feat_json = sig
             setup_reason = sig_reason
@@ -98,6 +106,11 @@ def trade_whys_for_day(db_path: str, day_utc: str) -> list[TradeWhyRow]:
                 m = feat.get("model")
                 if isinstance(m, dict):
                     model_proba = _safe_float(m.get("proba"))
+                    model_provider = str(m.get("provider")) if m.get("provider") is not None else None
+            if model_provider is None:
+                m = feat.get("model")
+                if isinstance(m, dict) and m.get("provider") is not None:
+                    model_provider = str(m.get("provider"))
             # news
             nb = feat.get("news")
             if isinstance(nb, dict):
@@ -121,6 +134,14 @@ def trade_whys_for_day(db_path: str, day_utc: str) -> list[TradeWhyRow]:
             if isinstance(t, dict):
                 taapi_present = any(t.get(k) is not None for k in ("rsi_1m", "rsi_15m", "macd_1m", "macd_signal_1m"))
 
+            indicator_provider = str(feat.get("indicator_provider")) if feat.get("indicator_provider") is not None else None
+            iu = feat.get("indicators_used")
+            if isinstance(iu, list):
+                indicators_used = [str(x) for x in iu if x is not None]
+            rv = feat.get("rule_votes")
+            if isinstance(rv, dict):
+                rule_votes = rv
+
         out.append(
             TradeWhyRow(
                 ts=ts,
@@ -130,9 +151,13 @@ def trade_whys_for_day(db_path: str, day_utc: str) -> list[TradeWhyRow]:
                 action=str(action) if action is not None else None,
                 setup_reason=str(setup_reason) if setup_reason is not None else None,
                 model_proba=model_proba,
+                model_provider=model_provider,
                 news_count=news_count,
                 news_sent_mean=news_sent_mean,
                 taapi_present=taapi_present,
+                indicator_provider=indicator_provider,
+                indicators_used=indicators_used,
+                rule_votes=rule_votes,
             )
         )
 

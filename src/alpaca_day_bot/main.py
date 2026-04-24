@@ -1272,6 +1272,11 @@ def _run_in_window_trading_cycle(
             pass
 
         # Record news+indicator feature visibility even if this becomes HOLD.
+        try:
+            # Helps reporting: what indicator backend we used for enrichment.
+            feat["indicator_provider"] = (settings.indicator_provider or "").strip().lower() or None
+        except Exception:
+            pass
         _maybe_add_taapi_features(sym=sym, feat=feat)
         _maybe_add_tvta_features(sym=sym, feat=feat)
         nf = _maybe_add_news_features(sym=sym, feat=feat)

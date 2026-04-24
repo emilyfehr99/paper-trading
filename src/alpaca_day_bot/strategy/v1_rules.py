@@ -319,6 +319,27 @@ class V1RulesSignalEngine(BaseStrategy):
         volume_ratio = float(last["volume"]) / float(vol_sma)
         volume_confirm = volume_ratio > float(self._volume_confirm_mult)
 
+        # Record the "why" in a structured way so reports can show the reasoning.
+        # (This lives in ledger `signals.features_json`.)
+        checks_long = {
+            "htf_ok_long": bool(htf_ok_long),
+            "rsi_pullback": bool(rsi_pullback),
+            "above_ema": bool(above_ema),
+            "macd_bull_cross": bool(macd_bull_cross),
+            "macd_bull": bool(macd_bull),
+            "above_vwap": bool(above_vwap),
+            "volume_confirm": bool(volume_confirm),
+        }
+        checks_short = {
+            "htf_ok_short": bool(htf_ok_short),
+            "rsi_rebound": bool(float(last["rsi"]) >= float(self._rsi_rebound_min_short)),
+            "below_ema": bool(below_ema),
+            "macd_bear_cross": bool(macd_bear_cross),
+            "macd_bear": bool(macd_bear),
+            "below_vwap": bool(below_vwap),
+            "volume_confirm": bool(volume_confirm),
+        }
+
         features = {
             "close": float(last["close"]),
             "rsi_14": float(last["rsi"]),
@@ -342,6 +363,24 @@ class V1RulesSignalEngine(BaseStrategy):
             "atr_monthly": (float(last.get("atr_monthly")) if not pd.isna(last.get("atr_monthly")) else atr_avg),
             "htf_ok_long": bool(htf_ok_long),
             "htf_ok_short": bool(htf_ok_short),
+            "strategy": {
+                "name": "v1_rules",
+                "signal_timeframe": str(self._signal_timeframe),
+                "aggressive_mode": bool(self._aggressive_mode),
+            },
+            "rule_votes": {"long": checks_long, "short": checks_short},
+            "indicators_used": [
+                "rsi_14",
+                "macd",
+                "macd_signal",
+                "vwap",
+                "volume_ratio",
+                "ema_20",
+                "ema_9",
+                "ema_21",
+                "htf_rsi",
+                "atr",
+            ],
         }
 
         # Long entry

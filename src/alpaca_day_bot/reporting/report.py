@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from alpaca_day_bot.reporting.accuracy import forward_accuracy_for_calendar_day
-from alpaca_day_bot.reporting.model_diagnostics import model_diagnostics_for_day
+from alpaca_day_bot.reporting.model_diagnostics import model_diagnostics_for_day, model_diagnostics_for_day_by_action
 from alpaca_day_bot.reporting.trades import realized_trade_stats_for_day
 from alpaca_day_bot.reporting.trade_why import trade_whys_for_day
 from alpaca_day_bot.reporting.virtual_options import virtual_options_stats_for_day
@@ -87,25 +87,73 @@ def write_daily_report(
         max_dd = _max_drawdown(ser)
         sharpe_intraday = _sharpe_from_returns(ser.pct_change().dropna(), annualization=252.0 * 6.5 * 60.0 / 5.0)
 
-    acc = forward_accuracy_for_calendar_day(db_path, day, market_tz=market_tz)
-    acc_lines: list[str] = []
-    if acc is not None:
-        hit_pct = (acc.directional_hits / acc.labeled_count) if acc.labeled_count else 0.0
-        acc_lines = [
+    def _acc_block(*, title: str, actions: tuple[str, ...]) -> list[str]:
+        a = forward_accuracy_for_calendar_day(db_path, day, market_tz=market_tz, actions=actions)
+        if a is None:
+            return [
+                "",
+                f"### {title}",
+                f"- No labeled {', '.join(actions)} signals for this calendar day yet (needs a later tick after the min age).",
+            ]
+        hit_pct = (a.directional_hits / a.labeled_count) if a.labeled_count else 0.0
+        return [
             "",
-            "### Signal directional accuracy (labeled BUYs)",
-            f"- **Labeled signals**: {acc.labeled_count}",
+            f"### {title}",
+            f"- **Labeled signals**: {a.labeled_count}",
             f"- **Directional hit rate** (forward return > 0): {hit_pct*100:.1f}%",
-            f"- **Mean forward return**: {fmt_pct(acc.mean_return_pct)}",
-            f"- **Median forward return**: {fmt_pct(acc.median_return_pct)}",
-            f"- _{acc.note}_",
+            f"- **Mean forward return**: {fmt_pct(a.mean_return_pct)}",
+            f"- **Median forward return**: {fmt_pct(a.median_return_pct)}",
+            f"- _{a.note}_",
         ]
-    else:
-        acc_lines = [
-            "",
-            "### Signal directional accuracy (labeled BUYs)",
-            "- No labeled BUY signals for this calendar day yet (needs a later tick after the min age).",
-        ]
+
+    acc_lines = [
+        *_acc_block(title="Signal directional accuracy (labeled LONG / BUY)", actions=("BUY",)),
+        *_acc_block(title="Signal directional accuracy (labeled SHORT)", actions=("SHORT",)),
+    ]
+
+    # Training metadata (written by ml.train next to the joblib artifact)
+    model_train_lines: list[str] = []
+    try:
+        import json
+
+        p = Path("state/models/latest.json")
+        if p.exists():
+            j = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(j, dict) and not bool(j.get("skipped")):
+                m = j.get("metrics") if isinstance(j.get("metrics"), dict) else {}
+                try:
+                    pos_rate_s = "n/a" if m.get("pos_rate") is None else f"{float(m.get('pos_rate'))*100:.1f}%"
+                except Exception:
+                    pos_rate_s = "n/a"
+                try:
+                    auc_s = "n/a" if m.get("auc") is None else f"{float(m.get('auc')):.3f}"
+                except Exception:
+                    auc_s = "n/a"
+                try:
+                    acc_s = "n/a" if m.get("acc") is None else f"{float(m.get('acc'))*100:.1f}%"
+                except Exception:
+                    acc_s = "n/a"
+                model_train_lines = [
+                    "",
+                    "### Model training (latest)",
+                    f"- **Trained at (UTC)**: {j.get('trained_at', 'n/a')}",
+                    f"- **Dataset kind**: {j.get('dataset_kind', 'n/a')}",
+                    f"- **Provider**: {j.get('provider', 'n/a')}",
+                    f"- **Rows seen**: {j.get('rows_seen', 'n/a')}",
+                    f"- **Test n**: {m.get('n', 'n/a')}",
+                    f"- **Test pos rate**: {pos_rate_s}",
+                    f"- **Test AUC**: {auc_s}",
+                    f"- **Test accuracy**: {acc_s}",
+                    f"- **Recommended min proba**: {j.get('recommended_min_proba', 'n/a')}",
+                ]
+            elif isinstance(j, dict) and bool(j.get("skipped")):
+                model_train_lines = [
+                    "",
+                    "### Model training (latest)",
+                    f"- Skipped: {j.get('skip_reason', 'n/a')} (n_labeled={j.get('n_labeled', 'n/a')}, min_required={j.get('min_required', 'n/a')})",
+                ]
+    except Exception:
+        model_train_lines = []
 
     md = model_diagnostics_for_day(db_path, day)
     model_lines: list[str] = []
@@ -118,6 +166,24 @@ def write_daily_report(
         ]
         if md.buckets:
             for b in md.buckets:
+                hr = ("n/a" if b.hit_rate is None else f"{b.hit_rate*100:.1f}%")
+                model_lines.append(f"- **{b.bucket}**: n={b.n}, hit={hr}")
+        else:
+            model_lines.append("- Not enough rows with probability to bucket yet.")
+
+    # Optional: separate diagnostics by side (BUY vs SHORT)
+    md_short = model_diagnostics_for_day_by_action(db_path, day, action="SHORT")
+    if md_short is not None:
+        model_lines.extend(
+            [
+                "",
+                "### Model diagnostics (SHORT labels)",
+                f"- **Labeled signals**: {md_short.n_labeled}",
+                f"- **With model probability recorded**: {md_short.n_with_proba}",
+            ]
+        )
+        if md_short.buckets:
+            for b in md_short.buckets:
                 hr = ("n/a" if b.hit_rate is None else f"{b.hit_rate*100:.1f}%")
                 model_lines.append(f"- **{b.bucket}**: n={b.n}, hit={hr}")
         else:
@@ -177,6 +243,7 @@ def write_daily_report(
         f"- **Sharpe (snapshot returns, approx.)**: {('n/a' if sharpe_intraday is None else f'{sharpe_intraday:.2f}')}",
         f"- **Trade updates (fills)**: {s.trades}",
         *acc_lines,
+        *model_train_lines,
         *model_lines,
         *trade_lines,
         *exec_lines,
@@ -221,9 +288,26 @@ def _trade_why_lines(db_path: str, day: date) -> list[str]:
         mp = "n/a" if r.model_proba is None else f"{r.model_proba:.3f}"
         nn = "n/a" if r.news_count is None else str(r.news_count)
         tp = "n/a" if r.taapi_present is None else str(r.taapi_present).lower()
+        prov = "n/a" if r.model_provider is None else str(r.model_provider)
+        ip = "n/a" if r.indicator_provider is None else str(r.indicator_provider)
+        inds = "" if not r.indicators_used else f" inds={','.join(r.indicators_used[:10])}"
+        rv = ""
+        try:
+            # prefer the votes that match the action when available
+            act = (r.action or "").strip().upper()
+            if isinstance(r.rule_votes, dict):
+                if act == "SHORT" and isinstance(r.rule_votes.get("short"), dict):
+                    ok = [k for k, v in (r.rule_votes.get("short") or {}).items() if v]
+                    rv = f" votes={','.join(ok[:8])}"
+                elif act == "BUY" and isinstance(r.rule_votes.get("long"), dict):
+                    ok = [k for k, v in (r.rule_votes.get("long") or {}).items() if v]
+                    rv = f" votes={','.join(ok[:8])}"
+        except Exception:
+            rv = ""
         out.append(
             f"- **{r.symbol}** {str(r.side).upper()} qty={qty} "
-            f"setup={r.setup_reason or 'n/a'} model_p={mp} news_n={nn} taapi={tp}"
+            f"setup={r.setup_reason or 'n/a'} model={prov} model_p={mp} "
+            f"news_n={nn} taapi={tp} ind_provider={ip}{inds}{rv}"
         )
     return out
 
