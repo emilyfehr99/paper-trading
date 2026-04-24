@@ -96,6 +96,31 @@ class OrderExecutor:
             return []
         return out
 
+    def short_positions_count(self) -> int:
+        n = 0
+        try:
+            for p in self._tc.get_all_positions():
+                try:
+                    qty = float(getattr(p, "qty", 0.0) or 0.0)
+                    if qty < 0:
+                        n += 1
+                except Exception:
+                    continue
+        except Exception:
+            return 0
+        return int(n)
+
+    def get_position_entry_price(self, symbol: str) -> float | None:
+        try:
+            p = self._tc.get_open_position(symbol)
+            px = getattr(p, "avg_entry_price", None)
+            if px is None:
+                return None
+            v = float(px)
+            return v if v > 0 else None
+        except Exception:
+            return None
+
     def has_position(self, symbol: str) -> bool:
         try:
             _ = self._tc.get_open_position(symbol)

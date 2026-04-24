@@ -89,6 +89,14 @@ jobs:
             alpaca-paper-state-${{ runner.os }}-ml-${{ steps.nydate.outputs.d }}-
             alpaca-paper-state-${{ runner.os }}-
 
+      - uses: actions/cache@v4
+        with:
+          path: state/models
+          key: alpaca-paper-models-${{ runner.os }}-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
+          restore-keys: |
+            alpaca-paper-models-${{ runner.os }}-${{ steps.nydate.outputs.d }}-
+            alpaca-paper-models-${{ runner.os }}-
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -154,9 +162,12 @@ jobs:
           # Free IEX bars are delayed; align the strategy to 15m cadence.
           SIGNAL_TIMEFRAME: "15m"
           # Slower holds reduce noise from delayed bars.
-          BASE_HOLD_MINUTES: "60"
-          MIN_HOLD_MINUTES: "30"
-          MAX_HOLD_MINUTES_DYNAMIC: "120"
+          BASE_HOLD_MINUTES: "45"
+          MIN_HOLD_MINUTES: "15"
+          MAX_HOLD_MINUTES_DYNAMIC: "90"
+          # Execution quality filters
+          MIN_VOLUME_RATIO_TRADE: "1.0"
+          MAX_SHORT_POSITIONS: "5"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Train/update ML model (from latest labels)
@@ -173,6 +184,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: alpaca-state-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
+          path: state/
+          if-no-files-found: ignore
+
+      - name: Upload state snapshot (latest)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-state-latest-${{ steps.nydate.outputs.d }}
           path: state/
           if-no-files-found: ignore
 

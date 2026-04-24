@@ -592,6 +592,37 @@ def _run_in_window_trading_cycle(
                             pass
                     if target <= 0:
                         continue
+                    # Profit-protect exit: if move >= +1R, close and lock it in.
+                    try:
+                        entry_px = float(extra.get("entry_price") or 0.0) if isinstance(extra, dict) else 0.0
+                        stop_dist = float(extra.get("stop_distance") or 0.0) if isinstance(extra, dict) else 0.0
+                        act0 = str(extra.get("action") or "").upper() if isinstance(extra, dict) else ""
+                        if entry_px > 0 and stop_dist > 0 and act0 in ("BUY", "SHORT"):
+                            dfp = _run_sync(buffer.snapshot_df(sym))
+                            if dfp is not None and not getattr(dfp, "empty", True):
+                                last_px = float(dfp["close"].iloc[-1])
+                                hit = (
+                                    (act0 == "BUY" and (last_px - entry_px) >= stop_dist)
+                                    or (act0 == "SHORT" and (entry_px - last_px) >= stop_dist)
+                                )
+                                if hit:
+                                    res = executor.close_position_market(sym)
+                                    ledger.record_order_intent(
+                                        ts=t0,
+                                        symbol=sym,
+                                        side="close",
+                                        notional_usd=0.0,
+                                        stop_price=0.0,
+                                        take_profit_price=0.0,
+                                        client_order_id=None,
+                                        alpaca_order_id=None,
+                                        submitted=res.submitted,
+                                        reason=f"profit_exit_1r:{res.reason}",
+                                        extra={"action": "EXIT_PROFIT_1R"},
+                                    )
+                                    continue
+                    except Exception:
+                        pass
                     if age_m < target:
                         continue
                     res = executor.close_position_market(sym)
@@ -745,6 +776,50 @@ def _run_in_window_trading_cycle(
             return
         if executor.has_position(sym):
             return
+
+        # Execution-quality filter: require sufficient relative volume.
+        try:
+            mvr = float(getattr(settings, "min_volume_ratio_trade", 0.0) or 0.0)
+            vr = float(feat.get("volume_ratio") or 0.0)
+            if mvr > 0 and vr > 0 and vr < mvr:
+                ledger.record_order_intent(
+                    ts=t0,
+                    symbol=sym,
+                    side=("buy" if action == "BUY" else "sell"),
+                    notional_usd=0.0,
+                    stop_price=0.0,
+                    take_profit_price=0.0,
+                    client_order_id=None,
+                    alpaca_order_id=None,
+                    submitted=False,
+                    reason="min_volume_ratio",
+                    extra={"action": action, "volume_ratio": vr, "min_volume_ratio_trade": mvr},
+                )
+                return
+        except Exception:
+            pass
+
+        # Short guardrail: cap concurrent shorts.
+        if action == "SHORT":
+            try:
+                mxs = int(getattr(settings, "max_short_positions", 0) or 0)
+                if mxs > 0 and int(executor.short_positions_count()) >= mxs:
+                    ledger.record_order_intent(
+                        ts=t0,
+                        symbol=sym,
+                        side="sell",
+                        notional_usd=0.0,
+                        stop_price=0.0,
+                        take_profit_price=0.0,
+                        client_order_id=None,
+                        alpaca_order_id=None,
+                        submitted=False,
+                        reason="max_short_positions",
+                        extra={"action": action, "max_short_positions": mxs},
+                    )
+                    return
+            except Exception:
+                pass
 
         # Optional confirmation: require the SAME signal condition to persist for N bars.
         try:
@@ -1045,6 +1120,8 @@ def _run_in_window_trading_cycle(
                 "target_hold_minutes": target_hold,
                 "entry_order_type": entry_type,
                 "limit_price": float(limit_price) if limit_price is not None else None,
+                "entry_price": float(last_close),
+                "stop_distance": float(stop_dist),
             },
         )
         if res.submitted:

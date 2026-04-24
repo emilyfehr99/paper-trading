@@ -188,6 +188,12 @@ class Settings(BaseSettings):
     # Do not trust ML gating until we have at least this many executed round trips.
     min_executed_round_trips_for_model: int = Field(default=200, alias="MIN_EXECUTED_ROUND_TRIPS_FOR_MODEL")
 
+    # Execution-quality filters
+    min_volume_ratio_trade: float = Field(default=1.0, alias="MIN_VOLUME_RATIO_TRADE")
+
+    # Short guardrails
+    max_short_positions: int = Field(default=5, alias="MAX_SHORT_POSITIONS")
+
     # Virtual options (mock calls/puts; NOT sent to Alpaca)
     sim_options_enabled: bool = Field(default=False, alias="SIM_OPTIONS_ENABLED")
     # Risk: at worst you lose the notional (like long premium). Profit scales with leverage * underlying move.
