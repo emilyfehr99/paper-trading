@@ -465,16 +465,28 @@ class OrderExecutor:
             return ExecutionResult(False, "empty_symbol")
         try:
             # Full close: do not pass ClosePositionRequest unless specifying qty/percentage.
-            _ = self._tc.close_position(sym)
-            return ExecutionResult(True, "close_submitted", client_order_id=None, alpaca_order_id=None)
+            order = self._tc.close_position(sym)
+            oid = None
+            try:
+                oid = str(getattr(order, "id", None)) if order is not None else None
+            except Exception:
+                oid = None
+            return ExecutionResult(True, "close_submitted", client_order_id=None, alpaca_order_id=oid)
         except Exception as e:
             msg = str(e)
             # Common when bracket/OCO legs are still open: shares are held_for_orders.
             if "insufficient qty available for order" in msg or "\"held_for_orders\"" in msg:
                 try:
                     self._cancel_open_orders_for_symbol(sym)
-                    _ = self._tc.close_position(sym)
-                    return ExecutionResult(True, "close_submitted_after_cancel", client_order_id=None, alpaca_order_id=None)
+                    order = self._tc.close_position(sym)
+                    oid = None
+                    try:
+                        oid = str(getattr(order, "id", None)) if order is not None else None
+                    except Exception:
+                        oid = None
+                    return ExecutionResult(
+                        True, "close_submitted_after_cancel", client_order_id=None, alpaca_order_id=oid
+                    )
                 except Exception as e2:
                     return ExecutionResult(False, f"close_error:{e2}", client_order_id=None, alpaca_order_id=None)
             return ExecutionResult(False, f"close_error:{e}", client_order_id=None, alpaca_order_id=None)

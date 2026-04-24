@@ -620,6 +620,22 @@ def _run_in_window_trading_cycle(
                                         reason=f"profit_exit_1r:{res.reason}",
                                         extra={"action": "EXIT_PROFIT_1R"},
                                     )
+                                    # Backfill late fills for closes (scheduled tick ends quickly).
+                                    if (
+                                        scheduled_tick
+                                        and bool(getattr(settings, "fill_confirm_enabled", True))
+                                        and res.alpaca_order_id
+                                    ):
+                                        try:
+                                            evt = executor.poll_order_fill_event(
+                                                order_id=str(res.alpaca_order_id),
+                                                timeout_s=float(getattr(settings, "fill_confirm_timeout_s", 60.0)),
+                                                poll_s=float(getattr(settings, "fill_confirm_poll_s", 3.0)),
+                                            )
+                                            if evt is not None:
+                                                ledger.record_trade_update(evt)
+                                        except Exception:
+                                            pass
                                     continue
                     except Exception:
                         pass
@@ -639,6 +655,21 @@ def _run_in_window_trading_cycle(
                         reason=f"time_exit:{res.reason}",
                         extra={"action": "EXIT_TIME", "age_minutes": age_m, "target_hold_minutes": target},
                     )
+                    if (
+                        scheduled_tick
+                        and bool(getattr(settings, "fill_confirm_enabled", True))
+                        and res.alpaca_order_id
+                    ):
+                        try:
+                            evt = executor.poll_order_fill_event(
+                                order_id=str(res.alpaca_order_id),
+                                timeout_s=float(getattr(settings, "fill_confirm_timeout_s", 60.0)),
+                                poll_s=float(getattr(settings, "fill_confirm_poll_s", 3.0)),
+                            )
+                            if evt is not None:
+                                ledger.record_trade_update(evt)
+                        except Exception:
+                            pass
                 except Exception:
                     continue
         except Exception:
@@ -708,6 +739,21 @@ def _run_in_window_trading_cycle(
                             "model_exit_min_proba": thr,
                         },
                     )
+                    if (
+                        scheduled_tick
+                        and bool(getattr(settings, "fill_confirm_enabled", True))
+                        and res.alpaca_order_id
+                    ):
+                        try:
+                            evt = executor.poll_order_fill_event(
+                                order_id=str(res.alpaca_order_id),
+                                timeout_s=float(getattr(settings, "fill_confirm_timeout_s", 60.0)),
+                                poll_s=float(getattr(settings, "fill_confirm_poll_s", 3.0)),
+                            )
+                            if evt is not None:
+                                ledger.record_trade_update(evt)
+                        except Exception:
+                            pass
                 except Exception:
                     continue
         except Exception:
@@ -1793,11 +1839,26 @@ def run(
                                     stop_price=0.0,
                                     take_profit_price=0.0,
                                     client_order_id=None,
-                                    alpaca_order_id=None,
+                                    alpaca_order_id=res.alpaca_order_id,
                                     submitted=res.submitted,
                                     reason=f"flatten_before_close:{res.reason}",
                                     extra={"action": "EXIT_FLATTEN"},
                                 )
+                                if (
+                                    scheduled_tick
+                                    and bool(getattr(settings, "fill_confirm_enabled", True))
+                                    and res.alpaca_order_id
+                                ):
+                                    try:
+                                        evt = executor.poll_order_fill_event(
+                                            order_id=str(res.alpaca_order_id),
+                                            timeout_s=float(getattr(settings, "fill_confirm_timeout_s", 60.0)),
+                                            poll_s=float(getattr(settings, "fill_confirm_poll_s", 3.0)),
+                                        )
+                                        if evt is not None:
+                                            ledger.record_trade_update(evt)
+                                    except Exception:
+                                        pass
                             except Exception:
                                 continue
                         # Do not open new trades after flatten window.
