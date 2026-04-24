@@ -32,6 +32,7 @@ class V1RulesSignalEngine(BaseStrategy):
         atr_len: int = 14,
         atr_regime_lookback: int = 50,
         atr_regime_max_mult: float = 2.0,
+        signal_timeframe: str = "15m",
     ) -> None:
         self._rsi_pullback_max = rsi_pullback_max
         self._ema_trend_len = ema_trend_len
@@ -46,6 +47,7 @@ class V1RulesSignalEngine(BaseStrategy):
         self._atr_len = atr_len
         self._atr_regime_lookback = atr_regime_lookback
         self._atr_regime_max_mult = atr_regime_max_mult
+        self._signal_timeframe = (signal_timeframe or "15m").strip().lower()
 
     def evaluate_setup(self, *, symbol: str, df_1m, df_15m) -> dict[str, Any]:
         """
@@ -208,7 +210,10 @@ class V1RulesSignalEngine(BaseStrategy):
         df_1m: 1-minute OHLCV DataFrame indexed by UTC timestamp.
         df_15m: 15-minute OHLCV DataFrame indexed by UTC timestamp.
         """
-        if df_1m is None or getattr(df_1m, "empty", True):
+        # For free IEX bars (delayed) + 15m scheduled cadence, prefer making decisions on 15m bars.
+        use_15m = self._signal_timeframe in ("15m", "15", "15min", "15mins", "15minute", "15minutes")
+        df_base = df_15m if use_15m else df_1m
+        if df_base is None or getattr(df_base, "empty", True):
             return None
 
         import pandas as pd
@@ -226,7 +231,7 @@ class V1RulesSignalEngine(BaseStrategy):
             cum_v = dfx["volume"].astype(float).groupby(d).cumsum()
             return (cum_pv / cum_v).replace([float("inf"), float("-inf")], float("nan"))
 
-        df = df_1m.copy()
+        df = df_base.copy()
         # pandas-ta VWAP requires an ordered DatetimeIndex; enforce monotonic UTC index.
         try:
             df.index = pd.to_datetime(df.index, utc=True)

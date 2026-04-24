@@ -1543,6 +1543,7 @@ def run(
         htf_rsi_max_short=settings.htf_rsi_max_short,
         rsi_rebound_min_short=settings.rsi_rebound_min_short,
         aggressive_mode=settings.aggressive_mode,
+        signal_timeframe=getattr(settings, "signal_timeframe", "15m"),
     )
 
     if build_universe:

@@ -149,7 +149,13 @@ jobs:
           RSI_REBOUND_MIN_SHORT: "50"
           VOLUME_CONFIRM_MULT: "0.8"
           # Label immediately so ML can start training sooner (paper only).
-          SIGNAL_ACCURACY_MIN_AGE_MINUTES: "0"
+          SIGNAL_ACCURACY_MIN_AGE_MINUTES: "60"
+          # Free IEX bars are delayed; align the strategy to 15m cadence.
+          SIGNAL_TIMEFRAME: "15m"
+          # Slower holds reduce noise from delayed bars.
+          BASE_HOLD_MINUTES: "60"
+          MIN_HOLD_MINUTES: "30"
+          MAX_HOLD_MINUTES_DYNAMIC: "120"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Train/update ML model (from latest labels)
