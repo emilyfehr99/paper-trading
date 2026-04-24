@@ -131,6 +131,8 @@ jobs:
           MODEL_MIN_PROBA: "0.60"
           MODEL_MIN_PROBA_LONG: "0.60"
           MODEL_MIN_PROBA_SHORT: "0.70"
+          # Submit more top-ranked candidates per 15m tick (more fills, still gated by rules+news).
+          TOP_N_PER_TICK: "6"
           UNIVERSE_ENABLED: "true"
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"
@@ -154,11 +156,11 @@ jobs:
           UNIVERSE_MAX_PRICE: "50"
           UNIVERSE_MIN_PRICE: "5"
           # Loosen HTF trend gates so more setups qualify
-          HTF_RSI_MIN: "35"
+          HTF_RSI_MIN: "32"
           HTF_RSI_MAX_SHORT: "70"
           RSI_PULLBACK_MAX: "55"
           RSI_REBOUND_MIN_SHORT: "50"
-          VOLUME_CONFIRM_MULT: "0.8"
+          VOLUME_CONFIRM_MULT: "0.75"
           # Label immediately so ML can start training sooner (paper only).
           SIGNAL_ACCURACY_MIN_AGE_MINUTES: "60"
           # Free IEX bars are delayed; align the strategy to 15m cadence.
@@ -168,7 +170,7 @@ jobs:
           MIN_HOLD_MINUTES: "15"
           MAX_HOLD_MINUTES_DYNAMIC: "90"
           # Execution quality filters
-          MIN_VOLUME_RATIO_TRADE: "1.0"
+          MIN_VOLUME_RATIO_TRADE: "0.85"
           MAX_SHORT_POSITIONS: "5"
           # Flatten positions before close to avoid overnight holds
           FLATTEN_BEFORE_CLOSE_MINUTES: "5"
