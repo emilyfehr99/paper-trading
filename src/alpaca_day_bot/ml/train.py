@@ -161,6 +161,7 @@ def train_and_save(
             "db_path": db_path,
             "min_horizon_minutes": float(min_horizon_minutes),
             "provider": provider,
+            "dataset_kind": ds_kind,
             "metrics": asdict(metrics),
             "extra_metrics": {},
             "recommended_min_proba": 0.5,
