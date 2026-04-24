@@ -1810,7 +1810,7 @@ def run(
                     ledger=ledger,
                     executor=executor,
                     buffer=buffer,
-                    strategy=strategy,
+                    strategy=strategy_cons,
                     risk=risk,
                     t0=t0,
                     market_day=market_day,
