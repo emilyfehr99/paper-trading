@@ -1763,6 +1763,40 @@ def run(
         ledger.record_equity_snapshot(t0, equity, gross)
         last_report_day = market_day
         try:
+            # Flatten before close (avoid overnight holds)
+            try:
+                fb = int(getattr(settings, "flatten_before_close_minutes", 5) or 5)
+            except Exception:
+                fb = 5
+            if fb > 0:
+                try:
+                    from datetime import datetime as _dt, timedelta as _td
+
+                    close_cut = (_dt.combine(market_day, settings.trade_end, tzinfo=settings.tzinfo()) - _td(minutes=fb)).time()
+                    if mt >= close_cut:
+                        for sym in executor.open_position_symbols():
+                            try:
+                                res = executor.close_position_market(sym)
+                                ledger.record_order_intent(
+                                    ts=t0,
+                                    symbol=sym,
+                                    side="close",
+                                    notional_usd=0.0,
+                                    stop_price=0.0,
+                                    take_profit_price=0.0,
+                                    client_order_id=None,
+                                    alpaca_order_id=None,
+                                    submitted=res.submitted,
+                                    reason=f"flatten_before_close:{res.reason}",
+                                    extra={"action": "EXIT_FLATTEN"},
+                                )
+                            except Exception:
+                                continue
+                        # Do not open new trades after flatten window.
+                        in_window = False
+                except Exception:
+                    pass
+
             if not in_window:
                 log.info(
                     "scheduled_tick outside trade window",

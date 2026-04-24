@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     market_tz: str = Field(default="America/New_York", alias="MARKET_TZ")
     trade_start: time = Field(default=time(9, 35), alias="TRADE_START")
     trade_end: time = Field(default=time(15, 50), alias="TRADE_END")
+    flatten_before_close_minutes: int = Field(default=5, alias="FLATTEN_BEFORE_CLOSE_MINUTES")
 
     # Risk limits
     starting_equity_usd: float = Field(default=1000.0, alias="STARTING_EQUITY_USD")

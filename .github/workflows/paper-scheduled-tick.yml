@@ -145,7 +145,7 @@ jobs:
           MAX_POSITIONS: "25"
           MAX_TRADES_PER_DAY: "200"
           MAX_GROSS_EXPOSURE_PCT: "0"
-          MAX_DAILY_LOSS_PCT: "0"
+          MAX_DAILY_LOSS_PCT: "0.01"
           # Hard per-trade spend cap
           MAX_NOTIONAL_PER_TRADE_USD: "50"
           RISK_PER_TRADE_PCT: "0.01"
@@ -170,6 +170,8 @@ jobs:
           # Execution quality filters
           MIN_VOLUME_RATIO_TRADE: "1.0"
           MAX_SHORT_POSITIONS: "5"
+          # Flatten positions before close to avoid overnight holds
+          FLATTEN_BEFORE_CLOSE_MINUTES: "5"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Train/update ML model (from latest labels)
