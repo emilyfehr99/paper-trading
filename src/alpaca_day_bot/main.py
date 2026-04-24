@@ -640,7 +640,7 @@ def _run_in_window_trading_cycle(
 
                     df_1m = _run_sync(buffer.snapshot_df(sym))
                     df_15m = _run_sync(buffer.snapshot_resampled_df(sym, "15min"))
-                    sig_now = strategy.decide(symbol=sym, df_1m=df_1m, df_15m=df_15m)
+                    sig_now = strategy_cons.decide(symbol=sym, df_1m=df_1m, df_15m=df_15m)
                     if sig_now is None or not isinstance(sig_now.features, dict):
                         continue
                     feat_now = dict(sig_now.features)
@@ -746,31 +746,33 @@ def _run_in_window_trading_cycle(
         if executor.has_position(sym):
             return
 
-        # Optional confirmation: require the setup to persist for N bars.
+        # Optional confirmation: require the SAME signal condition to persist for N bars.
         try:
             cb = int(getattr(settings, "confirm_bars", 1) or 1)
         except Exception:
             cb = 1
         if cb > 1:
             try:
-                import pandas_ta as ta
-                import numpy as np
-
-                if len(df_1m) < 25:
+                # Use the same timeframe as the strategy.
+                use_15m = str(getattr(settings, "signal_timeframe", "15m") or "15m").strip().lower().startswith("15")
+                df_base = _run_sync(buffer.snapshot_resampled_df(sym, "15min")) if use_15m else df_1m
+                if df_base is None or getattr(df_base, "empty", True):
                     return
-                tmp = df_1m.copy()
-                tmp["ema_20"] = ta.ema(tmp["close"], length=20)
-                tmp["rsi"] = ta.rsi(tmp["close"], length=14)
-                macd = ta.macd(tmp["close"], fast=12, slow=26, signal=9)
-                if macd is not None:
-                    tmp = pd.concat([tmp, macd], axis=1)  # type: ignore[name-defined]
-                # use last N bars to confirm directionally
-                lastn = tmp.tail(cb)
-                if action == "BUY":
-                    if not bool(np.all(lastn["close"] > lastn["ema_20"])):  # type: ignore[index]
-                        return
-                else:
-                    if not bool(np.all(lastn["close"] < lastn["ema_20"])):  # type: ignore[index]
+                if len(df_base) < (cb + 5):
+                    return
+
+                use_aggr = bool(int(feat.get("aggressive_used") or 0))
+                strat = strategy_aggr if use_aggr else strategy_cons
+
+                # Require last N bars all produce the same action (BUY/SHORT).
+                n = len(df_base)
+                for off in range(cb - 1, -1, -1):
+                    dfx = df_base.iloc[: n - off]
+                    if use_15m:
+                        s = strat.decide(symbol=sym, df_1m=df_1m, df_15m=dfx)
+                    else:
+                        s = strat.decide(symbol=sym, df_1m=dfx, df_15m=_run_sync(buffer.snapshot_resampled_df(sym, "15min")))
+                    if s is None or s.action != action:
                         return
             except Exception:
                 # If confirmation calc fails, fail open (don't block trades).
@@ -1130,11 +1132,15 @@ def _run_in_window_trading_cycle(
 
         df_1m = _run_sync(buffer.snapshot_df(sym))
         df_15m = _run_sync(buffer.snapshot_resampled_df(sym, "15min"))
-        sig = strategy.decide(symbol=sym, df_1m=df_1m, df_15m=df_15m)
+        # Use aggressive mode only in "good" regimes (trend + low vol).
+        rlbl0 = _regime_label(df_1m=df_1m, df_15m=df_15m)
+        use_aggr = bool(getattr(settings, "aggressive_mode", False)) and (rlbl0 == "trend_low_vol")
+        sig = (strategy_aggr if use_aggr else strategy_cons).decide(symbol=sym, df_1m=df_1m, df_15m=df_15m)
         if sig is None:
             continue
 
         feat: dict = dict(sig.features) if sig.features else {}
+        feat["aggressive_used"] = 1 if use_aggr else 0
         action = sig.action
         reason = sig.reason
         # Pre-filter: avoid short attempts on symbols Alpaca flags non-shortable.
@@ -1295,6 +1301,23 @@ def _apply_ml_filter_rank_and_trade(
     Take pre-scored candidates, filter by MODEL_MIN_PROBA and submit top-N.
     """
     if not candidates:
+        return
+
+    # Do not trust ML gating until we have enough executed outcomes.
+    # We still record probabilities, but we avoid filtering/ranking by them too early.
+    try:
+        min_exec = int(getattr(settings, "min_executed_round_trips_for_model", 200) or 200)
+    except Exception:
+        min_exec = 200
+    exec_n = None
+    try:
+        from alpaca_day_bot.reporting.executed_ml import executed_ml_summary
+
+        es = executed_ml_summary(str(Path(getattr(settings, "state_dir", "state")) / "ledger.sqlite3"))
+        exec_n = (es.n if es is not None else 0)
+    except Exception:
+        exec_n = 0
+    if int(exec_n or 0) < int(min_exec):
         return
     min_p = float(getattr(settings, "model_min_proba", 0.55))
     # Prefer dynamic regime thresholds file if present; otherwise allow env JSON override.
@@ -1534,7 +1557,8 @@ def run(
         per_symbol_cooldown_s=settings.per_symbol_cooldown_s,
         daily_profit_target_usd=settings.daily_profit_target_usd,
     )
-    strategy = V1RulesSignalEngine(
+    # Two strategy instances: conservative always; aggressive used only in good regimes.
+    strategy_cons = V1RulesSignalEngine(
         rsi_pullback_max=settings.rsi_pullback_max,
         volume_confirm_mult=settings.volume_confirm_mult,
         htf_rsi_min=settings.htf_rsi_min,
@@ -1542,7 +1566,18 @@ def run(
         enable_shorts=settings.enable_shorts,
         htf_rsi_max_short=settings.htf_rsi_max_short,
         rsi_rebound_min_short=settings.rsi_rebound_min_short,
-        aggressive_mode=settings.aggressive_mode,
+        aggressive_mode=False,
+        signal_timeframe=getattr(settings, "signal_timeframe", "15m"),
+    )
+    strategy_aggr = V1RulesSignalEngine(
+        rsi_pullback_max=settings.rsi_pullback_max,
+        volume_confirm_mult=settings.volume_confirm_mult,
+        htf_rsi_min=settings.htf_rsi_min,
+        atr_regime_max_mult=settings.atr_regime_max_mult,
+        enable_shorts=settings.enable_shorts,
+        htf_rsi_max_short=settings.htf_rsi_max_short,
+        rsi_rebound_min_short=settings.rsi_rebound_min_short,
+        aggressive_mode=True,
         signal_timeframe=getattr(settings, "signal_timeframe", "15m"),
     )
 

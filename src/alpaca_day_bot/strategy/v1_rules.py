@@ -219,14 +219,15 @@ class V1RulesSignalEngine(BaseStrategy):
         import pandas as pd
         import pandas_ta as ta
 
-        def _daily_vwap_utc(dfx: pd.DataFrame) -> pd.Series:
+        def _daily_vwap_ny(dfx: pd.DataFrame) -> pd.Series:
             """
-            Daily-reset VWAP anchored to midnight UTC ("anchor='D'").
+            Daily-reset VWAP anchored to the US session day (America/New_York).
             """
             tp = (dfx["high"].astype(float) + dfx["low"].astype(float) + dfx["close"].astype(float)) / 3.0
             pv = tp * dfx["volume"].astype(float)
-            # Reset at midnight (UTC) by grouping on date from a UTC index.
-            d = pd.to_datetime(dfx.index, utc=True).date
+            # Reset at NY midnight by grouping on NY-local date.
+            idx_ny = pd.to_datetime(dfx.index, utc=True).tz_convert("America/New_York")
+            d = idx_ny.date
             cum_pv = pv.groupby(d).cumsum()
             cum_v = dfx["volume"].astype(float).groupby(d).cumsum()
             return (cum_pv / cum_v).replace([float("inf"), float("-inf")], float("nan"))
@@ -253,7 +254,7 @@ class V1RulesSignalEngine(BaseStrategy):
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
         if macd is not None:
             df = pd.concat([df, macd], axis=1)
-        df["vwap_calc"] = _daily_vwap_utc(df)
+        df["vwap_calc"] = _daily_vwap_ny(df)
         df["volume_sma"] = df["volume"].rolling(int(self._volume_sma_len)).mean()
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(self._atr_len))
         df["atr_avg"] = df["atr"].rolling(int(self._atr_regime_lookback)).mean()

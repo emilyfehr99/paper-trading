@@ -103,8 +103,8 @@ jobs:
           UNIVERSE_ENABLED: "true"
           # Wider universe -> more trade opportunities
           UNIVERSE_MAX_SYMBOLS: "2000"
-          UNIVERSE_MIN_AVG_DOLLAR_VOL: "5000000"
-          UNIVERSE_MIN_PRICE: "1"
+          UNIVERSE_MIN_AVG_DOLLAR_VOL: "20000000"
+          UNIVERSE_MIN_PRICE: "5"
         run: python -m alpaca_day_bot --build-universe
 
       - name: Scheduled tick
@@ -142,6 +142,7 @@ jobs:
           PER_SYMBOL_COOLDOWN_S: "60"
           # Keep whole-share sizing compatible with the per-trade cap
           UNIVERSE_MAX_PRICE: "50"
+          UNIVERSE_MIN_PRICE: "5"
           # Loosen HTF trend gates so more setups qualify
           HTF_RSI_MIN: "35"
           HTF_RSI_MAX_SHORT: "70"

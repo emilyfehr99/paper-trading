@@ -74,8 +74,8 @@ jobs:
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           UNIVERSE_ENABLED: "true"
           UNIVERSE_MAX_SYMBOLS: "2000"
-          UNIVERSE_MIN_AVG_DOLLAR_VOL: "5000000"
-          UNIVERSE_MIN_PRICE: "1"
+          UNIVERSE_MIN_AVG_DOLLAR_VOL: "20000000"
+          UNIVERSE_MIN_PRICE: "5"
           UNIVERSE_MAX_PRICE: "50"
         run: python -m alpaca_day_bot --build-universe
 

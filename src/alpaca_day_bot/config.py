@@ -185,6 +185,8 @@ class Settings(BaseSettings):
     # Profit-focused guardrails
     confirm_bars: int = Field(default=1, alias="CONFIRM_BARS")  # require setup to persist N bars
     vol_spike_skip_enabled: bool = Field(default=False, alias="VOL_SPIKE_SKIP_ENABLED")
+    # Do not trust ML gating until we have at least this many executed round trips.
+    min_executed_round_trips_for_model: int = Field(default=200, alias="MIN_EXECUTED_ROUND_TRIPS_FOR_MODEL")
 
     # Virtual options (mock calls/puts; NOT sent to Alpaca)
     sim_options_enabled: bool = Field(default=False, alias="SIM_OPTIONS_ENABLED")
