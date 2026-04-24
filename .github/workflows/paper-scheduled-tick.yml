@@ -135,7 +135,7 @@ jobs:
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"
           # Profit-focused filters
-          CONFIRM_BARS: "2"
+          CONFIRM_BARS: "1"
           VOL_SPIKE_SKIP_ENABLED: "true"
           # Virtual options (simulated calls/puts; not sent to Alpaca)
           SIM_OPTIONS_ENABLED: "true"
@@ -147,9 +147,9 @@ jobs:
           MAX_GROSS_EXPOSURE_PCT: "0"
           MAX_DAILY_LOSS_PCT: "0.01"
           # Hard per-trade spend cap
-          MAX_NOTIONAL_PER_TRADE_USD: "100"
+          MAX_NOTIONAL_PER_TRADE_USD: "300"
           RISK_PER_TRADE_PCT: "0.01"
-          PER_SYMBOL_COOLDOWN_S: "60"
+          PER_SYMBOL_COOLDOWN_S: "15"
           # Keep whole-share sizing compatible with the per-trade cap
           UNIVERSE_MAX_PRICE: "50"
           UNIVERSE_MIN_PRICE: "5"
