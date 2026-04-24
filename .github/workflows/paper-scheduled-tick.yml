@@ -129,6 +129,8 @@ jobs:
           # ML model layer (optional; uses state/models/latest.joblib if present)
           MODEL_ENABLED: "true"
           MODEL_MIN_PROBA: "0.60"
+          MODEL_MIN_PROBA_LONG: "0.60"
+          MODEL_MIN_PROBA_SHORT: "0.70"
           UNIVERSE_ENABLED: "true"
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"

@@ -1397,6 +1397,8 @@ def _apply_ml_filter_rank_and_trade(
     if int(exec_n or 0) < int(min_exec):
         return
     min_p = float(getattr(settings, "model_min_proba", 0.55))
+    min_p_long = float(getattr(settings, "model_min_proba_long", min_p) or min_p)
+    min_p_short = float(getattr(settings, "model_min_proba_short", max(min_p, 0.65)) or max(min_p, 0.65))
     # Prefer dynamic regime thresholds file if present; otherwise allow env JSON override.
     reg_map = {}
     try:
@@ -1414,18 +1416,19 @@ def _apply_ml_filter_rank_and_trade(
     keep = []
     for c in candidates:
         mp = float(c.get("model_proba", 0.0))
+        act = str(c.get("action") or "").strip().upper()
         feat = c.get("features") or {}
         rlbl = None
         try:
             rlbl = (feat.get("regime") if isinstance(feat, dict) else None) or None
         except Exception:
             rlbl = None
-        mp_req = min_p
+        mp_req = (min_p_short if act == "SHORT" else min_p_long)
         try:
             if rlbl and isinstance(reg_map, dict) and rlbl in reg_map:
                 mp_req = float(reg_map[rlbl])
         except Exception:
-            mp_req = min_p
+            mp_req = (min_p_short if act == "SHORT" else min_p_long)
         if mp >= mp_req:
             keep.append(c)
     keep.sort(key=lambda c: (-float(c.get("model_proba", 0.0)), str(c.get("symbol", ""))))

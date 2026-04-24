@@ -108,6 +108,8 @@ class Settings(BaseSettings):
     # ML model layer (trained from ledger labels)
     model_enabled: bool = Field(default=False, alias="MODEL_ENABLED")
     model_min_proba: float = Field(default=0.55, alias="MODEL_MIN_PROBA")
+    model_min_proba_long: float = Field(default=0.55, alias="MODEL_MIN_PROBA_LONG")
+    model_min_proba_short: float = Field(default=0.65, alias="MODEL_MIN_PROBA_SHORT")
     top_n_per_tick: int = Field(default=2, alias="TOP_N_PER_TICK")
     model_path: str = Field(default="state/models/latest.joblib", alias="MODEL_PATH")
 
