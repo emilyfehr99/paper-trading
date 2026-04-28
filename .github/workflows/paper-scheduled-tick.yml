@@ -131,6 +131,8 @@ jobs:
           MODEL_MIN_PROBA: "0.60"
           MODEL_MIN_PROBA_LONG: "0.60"
           MODEL_MIN_PROBA_SHORT: "0.70"
+          # Unblock trades with low historical trade count (bootstrap phase)
+          MIN_EXECUTED_ROUND_TRIPS_FOR_MODEL: "0"
           # Submit more top-ranked candidates per 15m tick (more fills, still gated by rules+news).
           TOP_N_PER_TICK: "6"
           UNIVERSE_ENABLED: "true"
