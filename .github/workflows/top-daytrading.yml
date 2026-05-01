@@ -32,7 +32,7 @@ jobs:
           python scripts/run_top_daytrading.py --resolution 1D --limit 30 --out out/top_daytrading.json
 
       - name: Upload result artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: top-daytrading
           path: tv-ta-api/out/top_daytrading.json

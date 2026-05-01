@@ -60,7 +60,7 @@ jobs:
 
       - name: Upload rolling training dataset
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: alpaca-ledger-rollup-latest
           path: state/ledgers/ledger_rollup.sqlite3
@@ -68,7 +68,7 @@ jobs:
 
       - name: Upload monthly rollup ledger(s)
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: alpaca-ledger-rollup-monthly
           path: state/ledgers/ledger_rollup_*.sqlite3
