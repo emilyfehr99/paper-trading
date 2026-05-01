@@ -40,6 +40,7 @@ from alpaca_day_bot.backtest import (
     symbol_daytrade_recommendations,
 )
 from alpaca_day_bot.universe import (
+    build_master_universe_assets,
     build_liquid_universe,
     filter_universe_symbols_by_max_price,
     load_universe_symbols,
@@ -1524,6 +1525,11 @@ def cli() -> None:
         help="Build a daily liquid universe (writes state/universe_latest.json) and exit.",
     )
     p.add_argument(
+        "--build-master-universe",
+        action="store_true",
+        help="Build a broad cached universe from Alpaca assets (writes state/universe_master.json) and exit.",
+    )
+    p.add_argument(
         "--write-report",
         action="store_true",
         help="Write daily+weekly report for the current market day and exit (no trading).",
@@ -1541,6 +1547,7 @@ def cli() -> None:
         backtest=bool(args.backtest),
         robustness=bool(args.robustness),
         build_universe=bool(args.build_universe),
+        build_master_universe=bool(args.build_master_universe),
         write_report=bool(args.write_report),
         close_virtual_options=bool(args.close_virtual_options),
         start=args.start,
@@ -1556,6 +1563,7 @@ def run(
     backtest: bool,
     robustness: bool,
     build_universe: bool = False,
+    build_master_universe: bool = False,
     write_report: bool = False,
     close_virtual_options: bool = False,
     start: str | None,
@@ -1717,12 +1725,31 @@ def run(
         macd_confirm_mode=getattr(settings, "macd_confirm_mode", "aligned_good_regime_else_cross"),
     )
 
+    if build_master_universe:
+        outp = str(Path(settings.state_dir) / "universe_master.json")
+        payload = build_master_universe_assets(
+            apca_api_key_id=settings.apca_api_key_id,
+            apca_api_secret_key=settings.apca_api_secret_key,
+            out_path=outp,
+            max_symbols=int(getattr(settings, "universe_master_max_symbols", 5000)),
+            require_shortable=bool(getattr(settings, "universe_master_require_shortable", False)),
+        )
+        log.info(
+            "master_universe_built",
+            extra={"extra_json": {"out_path": outp, "symbols": len(payload.get("symbols") or [])}},
+        )
+        ledger.close()
+        return
+
     if build_universe:
         outp = str(Path(settings.state_dir) / "universe_latest.json")
+        master_path = Path(settings.state_dir) / "universe_master.json"
+        candidates = load_universe_symbols(str(master_path)) if master_path.is_file() else []
         res = build_liquid_universe(
             apca_api_key_id=settings.apca_api_key_id,
             apca_api_secret_key=settings.apca_api_secret_key,
             out_path=outp,
+            candidate_symbols=candidates if candidates else None,
             max_symbols=int(settings.universe_max_symbols),
             lookback_days=int(settings.universe_lookback_days),
             min_price=float(settings.universe_min_price),

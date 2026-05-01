@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     universe_min_price: float = Field(default=2.0, alias="UNIVERSE_MIN_PRICE")
     universe_max_price: float = Field(default=20.0, alias="UNIVERSE_MAX_PRICE")
     universe_min_avg_dollar_vol: float = Field(default=20_000_000.0, alias="UNIVERSE_MIN_AVG_DOLLAR_VOL")
+    # Cached "master" universe (built from Alpaca assets). Used as candidate list for liquid universe build.
+    universe_master_max_symbols: int = Field(default=5000, alias="UNIVERSE_MASTER_MAX_SYMBOLS")
+    universe_master_require_shortable: bool = Field(default=False, alias="UNIVERSE_MASTER_REQUIRE_SHORTABLE")
 
     # Run modes
     observe_only: bool = Field(default=False, alias="OBSERVE_ONLY")

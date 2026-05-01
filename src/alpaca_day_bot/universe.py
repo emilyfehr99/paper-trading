@@ -26,11 +26,108 @@ def _write_json(path: Path, obj: dict) -> None:
     path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
 
 
+def build_master_universe_assets(
+    *,
+    apca_api_key_id: str,
+    apca_api_secret_key: str,
+    out_path: str,
+    max_symbols: int = 5000,
+    allowed_exchanges: tuple[str, ...] = ("NYSE", "NASDAQ", "AMEX", "ARCA", "BATS"),
+    require_marginable: bool = True,
+    require_tradable: bool = True,
+    require_shortable: bool = False,
+) -> dict:
+    """
+    Build a broad, cached symbol list using Alpaca Trading "assets" endpoint.
+    This is meant to be run infrequently (e.g., daily) and then narrowed to a liquid
+    subset for per-tick scanning.
+    """
+    from alpaca.trading.client import TradingClient
+
+    t0 = datetime.now(tz=timezone.utc)
+    tc = TradingClient(apca_api_key_id, apca_api_secret_key, paper=True)
+
+    try:
+        assets = tc.get_all_assets()
+    except Exception as e:
+        payload = {
+            "generated_at_utc": t0.isoformat(),
+            "source": "alpaca_assets",
+            "error": str(e),
+            "total_assets_seen": 0,
+            "symbols": [],
+        }
+        _write_json(Path(out_path), payload)
+        return payload
+
+    symbols: list[str] = []
+    rejected = {
+        "not_us_equity": 0,
+        "inactive": 0,
+        "not_tradable": 0,
+        "not_marginable": 0,
+        "not_shortable": 0,
+        "bad_exchange": 0,
+        "no_symbol": 0,
+    }
+
+    for a in assets or []:
+        sym = str(getattr(a, "symbol", "") or "").strip().upper()
+        if not sym:
+            rejected["no_symbol"] += 1
+            continue
+
+        status = str(getattr(a, "status", "") or "").strip().lower()
+        if status and status != "active":
+            rejected["inactive"] += 1
+            continue
+
+        ex = str(getattr(a, "exchange", "") or "").strip().upper()
+        if allowed_exchanges and ex and ex not in set(allowed_exchanges):
+            rejected["bad_exchange"] += 1
+            continue
+
+        if require_tradable and (getattr(a, "tradable", True) is False):
+            rejected["not_tradable"] += 1
+            continue
+        if require_marginable and (getattr(a, "marginable", True) is False):
+            rejected["not_marginable"] += 1
+            continue
+        if require_shortable and (getattr(a, "shortable", True) is False):
+            rejected["not_shortable"] += 1
+            continue
+
+        symbols.append(sym)
+
+    symbols = sorted(set(symbols))
+    if int(max_symbols) > 0:
+        symbols = symbols[: int(max_symbols)]
+
+    payload = {
+        "generated_at_utc": t0.isoformat(),
+        "source": "alpaca_assets",
+        "allowed_exchanges": list(allowed_exchanges),
+        "require_tradable": bool(require_tradable),
+        "require_marginable": bool(require_marginable),
+        "require_shortable": bool(require_shortable),
+        "max_symbols": int(max_symbols),
+        "total_assets_seen": len(assets or []),
+        "rejected_counts": rejected,
+        "symbols": symbols,
+        "notes": [
+            "This is a broad cached universe; per-tick scanning should use a smaller liquid subset.",
+        ],
+    }
+    _write_json(Path(out_path), payload)
+    return payload
+
+
 def build_liquid_universe(
     *,
     apca_api_key_id: str,
     apca_api_secret_key: str,
     out_path: str,
+    candidate_symbols: list[str] | None = None,
     max_symbols: int,
     lookback_days: int,
     min_price: float,
@@ -55,34 +152,38 @@ def build_liquid_universe(
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=lookback * 2)  # calendar padding for weekends/holidays
 
-    # 1) Candidate symbols via Alpaca Screener endpoints (does NOT require /v2/assets)
-    sc = ScreenerClient(apca_api_key_id, apca_api_secret_key)
-    candidates: list[str] = []
+    # 1) Candidate symbols
     rejects = {"no_candidates": 0, "no_bars": 0, "low_price": 0, "high_price": 0, "low_dollar_vol": 0}
+    symbols: list[str] = []
+    if candidate_symbols:
+        symbols = sorted({str(s).strip().upper() for s in candidate_symbols if str(s).strip()})
+    else:
+        # Fallback: Alpaca Screener endpoints (capped; good default if no master universe exists yet).
+        sc = ScreenerClient(apca_api_key_id, apca_api_secret_key)
+        candidates: list[str] = []
+        # Screener API caps:
+        # - most-actives: top <= 100
+        # - movers: top <= 50
+        top_n = max(50, min(int(max_symbols) * 3, 100))
+        try:
+            ma = sc.get_most_actives(MostActivesRequest(top=top_n))
+            for row in getattr(ma, "most_actives", []) or []:
+                s = str(getattr(row, "symbol", "")).strip().upper()
+                if s:
+                    candidates.append(s)
+        except Exception as e:
+            log.warning("universe most_actives failed err=%s", e)
 
-    # Screener API caps:
-    # - most-actives: top <= 100
-    # - movers: top <= 50
-    top_n = max(50, min(int(max_symbols) * 3, 100))
-    try:
-        ma = sc.get_most_actives(MostActivesRequest(top=top_n))
-        for row in getattr(ma, "most_actives", []) or []:
-            s = str(getattr(row, "symbol", "")).strip().upper()
-            if s:
-                candidates.append(s)
-    except Exception as e:
-        log.warning("universe most_actives failed err=%s", e)
+        try:
+            mv = sc.get_market_movers(MarketMoversRequest(top=min(50, top_n)))
+            for row in (getattr(mv, "gainers", []) or []) + (getattr(mv, "losers", []) or []):
+                s = str(getattr(row, "symbol", "")).strip().upper()
+                if s:
+                    candidates.append(s)
+        except Exception as e:
+            log.warning("universe movers failed err=%s", e)
 
-    try:
-        mv = sc.get_market_movers(MarketMoversRequest(top=min(50, top_n)))
-        for row in (getattr(mv, "gainers", []) or []) + (getattr(mv, "losers", []) or []):
-            s = str(getattr(row, "symbol", "")).strip().upper()
-            if s:
-                candidates.append(s)
-    except Exception as e:
-        log.warning("universe movers failed err=%s", e)
-
-    symbols = sorted(set(candidates))
+        symbols = sorted(set(candidates))
     total_assets_seen = len(symbols)
     if not symbols:
         rejects["no_candidates"] = 1
