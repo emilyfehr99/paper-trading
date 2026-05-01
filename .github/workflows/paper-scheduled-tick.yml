@@ -135,6 +135,8 @@ jobs:
           MIN_EXECUTED_ROUND_TRIPS_FOR_MODEL: "0"
           # Submit more top-ranked candidates per 15m tick (more fills, still gated by rules+news).
           TOP_N_PER_TICK: "6"
+          # MACD is now the primary directional gate for entries.
+          MACD_CONFIRM_MODE: "aligned_good_regime_else_cross"
           UNIVERSE_ENABLED: "true"
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"
