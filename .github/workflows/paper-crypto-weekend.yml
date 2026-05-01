@@ -28,17 +28,17 @@ jobs:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           ASSET_CLASS: "crypto"
-          # Keep it small + liquid by default.
-          SYMBOLS: '["BTC/USD","ETH/USD","SOL/USD"]'
+          # Broader, liquid weekend universe.
+          SYMBOLS: '["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD","ADA/USD","LTC/USD","AVAX/USD"]'
           # Use local indicators (TVTA is equity-focused).
           INDICATOR_PROVIDER: "local"
           NEWS_FETCH_ENABLED: "false"
           UNIVERSE_ENABLED: "false"
           MODEL_ENABLED: "false"
-          # Conservative weekend sizing (you can raise later).
-          MAX_NOTIONAL_PER_TRADE_USD: "50"
-          MAX_POSITIONS: "5"
-          MAX_TRADES_PER_DAY: "50"
+          # Weekend sizing + breadth.
+          MAX_NOTIONAL_PER_TRADE_USD: "100"
+          MAX_POSITIONS: "10"
+          MAX_TRADES_PER_DAY: "100"
           MAX_DAILY_LOSS_PCT: "0.01"
           PER_SYMBOL_COOLDOWN_S: "60"
           CONFIRM_BARS: "1"
