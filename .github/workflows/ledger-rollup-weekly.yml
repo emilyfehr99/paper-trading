@@ -10,18 +10,27 @@ concurrency:
   group: alpaca-ledger-rollup-weekly
   cancel-in-progress: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   rollup:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
+
       - name: Restore state cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: state
           key: alpaca-paper-state-${{ runner.os }}-weekly-${{ github.run_id }}
@@ -51,7 +60,7 @@ jobs:
 
       - name: Upload rolling training dataset
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-ledger-rollup-latest
           path: state/ledgers/ledger_rollup.sqlite3
@@ -59,7 +68,7 @@ jobs:
 
       - name: Upload monthly rollup ledger(s)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-ledger-rollup-monthly
           path: state/ledgers/ledger_rollup_*.sqlite3

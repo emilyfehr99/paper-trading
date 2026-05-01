@@ -6,19 +6,22 @@ on:
     # Daily after market close (UTC). Adjust as needed.
     - cron: "30 22 * * 1-5"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   train:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -28,7 +31,7 @@ jobs:
           echo "d=$(python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('America/New_York')).date().isoformat())")" >> "$GITHUB_OUTPUT"
 
       - name: Restore state (ledger + models)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: state
           # Cache keys are immutable; write ML runs to a unique key, and let the live tick restore the newest via restore-keys.
@@ -51,7 +54,7 @@ jobs:
 
       - name: Upload model artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-ml-model-${{ github.run_id }}
           path: state/models/

@@ -1,29 +1,47 @@
-# Paper trading: crypto weekend tick (24/7 symbols). Runs only Sat/Sun.
+# Paper trading: crypto weekend tick (24/7 symbols). Scheduled for America/Winnipeg Sat–Sun
+# (GitHub cron is UTC; see schedule entries below).
 name: Paper crypto weekend tick
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * 6,0"
+    # UTC crons that approximate weekend in America/Winnipeg (CST/CDT):
+    # - Sat 06:00–23:45 UTC: first full day segment (Sat 00:00 CST; skips first ~1h of Sat in CDT).
+    # - Sun: all day UTC.
+    # - Mon 00:00–05:45 UTC: tail of Sunday evening both offsets; may include Mon 00:00–00:45 in CDT.
+    - cron: "*/15 6-23 * * 6"
+    - cron: "*/15 * * * 0"
+    - cron: "*/15 0-5 * * 1"
 
 concurrency:
   group: alpaca-paper-crypto-weekend
   cancel-in-progress: false
 
+# Prefer Node 24 for JS actions (removes Node 20 deprecation warnings on hosted runners).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   tick:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Cache state (crypto)
-        uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
-          path: state
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
+
+      - name: Cache state (crypto)
+        uses: actions/cache@v5
+        with:
+          # Must match STATE_DIR below — ledger lives in state_crypto/, not state/.
+          path: state_crypto
           key: alpaca-crypto-state-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             alpaca-crypto-state-${{ runner.os }}-
@@ -51,14 +69,15 @@ jobs:
           MAX_TRADES_PER_DAY: "100"
           MAX_DAILY_LOSS_PCT: "0.01"
           DAILY_PROFIT_TARGET_USD: "100"
-          PER_SYMBOL_COOLDOWN_S: "60"
+          # Match paper-scheduled-tick (equity) for comparable trade cadence.
+          PER_SYMBOL_COOLDOWN_S: "15"
           CONFIRM_BARS: "1"
           SIGNAL_TIMEFRAME: "15m"
         run: python -m alpaca_day_bot --scheduled-tick
 
       - name: Upload crypto state artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-crypto-state-${{ github.run_id }}
           path: state_crypto/

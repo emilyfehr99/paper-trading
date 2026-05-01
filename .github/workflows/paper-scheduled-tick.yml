@@ -17,6 +17,9 @@ concurrency:
   group: alpaca-paper-scheduled-tick
   cancel-in-progress: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   market_open:
     runs-on: ubuntu-latest
@@ -67,9 +70,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
@@ -79,7 +82,7 @@ jobs:
         run: |
           echo "d=$(python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('America/New_York')).date().isoformat())")" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: state
           # Cache keys are immutable; use a unique key per run and restore the newest via restore-keys.
@@ -89,7 +92,7 @@ jobs:
             alpaca-paper-state-${{ runner.os }}-ml-${{ steps.nydate.outputs.d }}-
             alpaca-paper-state-${{ runner.os }}-
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: state/models
           key: alpaca-paper-models-${{ runner.os }}-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
@@ -97,7 +100,7 @@ jobs:
             alpaca-paper-models-${{ runner.os }}-${{ steps.nydate.outputs.d }}-
             alpaca-paper-models-${{ runner.os }}-
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: state/ledgers
           key: alpaca-paper-ledgers-${{ runner.os }}-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
@@ -105,7 +108,7 @@ jobs:
             alpaca-paper-ledgers-${{ runner.os }}-${{ steps.nydate.outputs.d }}-
             alpaca-paper-ledgers-${{ runner.os }}-
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -284,7 +287,7 @@ jobs:
 
       - name: Upload state artifact (debug / backup)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-state-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
           path: state/
@@ -292,7 +295,7 @@ jobs:
 
       - name: Upload state snapshot (latest)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-state-latest-${{ steps.nydate.outputs.d }}
           path: state/
@@ -300,7 +303,7 @@ jobs:
 
       - name: Upload rolling ledger snapshot (latest)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-ledger-rollup-latest
           path: state/ledgers/ledger_rollup.sqlite3
@@ -308,7 +311,7 @@ jobs:
 
       - name: Upload rolling ledger snapshot (monthly)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-ledger-rollup-${{ steps.nydate.outputs.d }}
           path: state/ledgers/ledger_rollup_*.sqlite3
@@ -316,7 +319,7 @@ jobs:
 
       - name: Upload reports artifact (daily/weekly)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: alpaca-reports-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
           path: reports/
