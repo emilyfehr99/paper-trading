@@ -36,10 +36,11 @@ jobs:
           UNIVERSE_ENABLED: "false"
           MODEL_ENABLED: "false"
           # Weekend sizing + breadth.
-          MAX_NOTIONAL_PER_TRADE_USD: "100"
+          MAX_NOTIONAL_PER_TRADE_USD: "300"
           MAX_POSITIONS: "10"
           MAX_TRADES_PER_DAY: "100"
           MAX_DAILY_LOSS_PCT: "0.01"
+          DAILY_PROFIT_TARGET_USD: "100"
           PER_SYMBOL_COOLDOWN_S: "60"
           CONFIRM_BARS: "1"
           SIGNAL_TIMEFRAME: "15m"
