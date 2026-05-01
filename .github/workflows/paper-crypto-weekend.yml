@@ -20,6 +20,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache state (crypto)
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: alpaca-crypto-state-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            alpaca-crypto-state-${{ runner.os }}-
+
       - name: Install package
         run: pip install -e .
 
@@ -45,4 +53,12 @@ jobs:
           CONFIRM_BARS: "1"
           SIGNAL_TIMEFRAME: "15m"
         run: python -m alpaca_day_bot --scheduled-tick
+
+      - name: Upload crypto state artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-crypto-state-${{ github.run_id }}
+          path: state/
+          if-no-files-found: ignore
 
