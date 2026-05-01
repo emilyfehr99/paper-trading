@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     apca_api_secret_key: str = Field(alias="APCA_API_SECRET_KEY")
 
     # Universe + data
+    asset_class: str = Field(
+        default="equity",
+        alias="ASSET_CLASS",
+        description="Asset class to trade: equity | crypto",
+    )
     symbols: list[str] = Field(
         default_factory=lambda: [
             "SPY",
@@ -41,6 +46,8 @@ class Settings(BaseSettings):
     rest_bar_poll_interval_s: float = Field(default=15.0, alias="REST_BAR_POLL_INTERVAL_S")
     # IEX (free) bars are delayed vs real time; requesting `end=now` often returns SIP / permission errors.
     rest_bar_end_lag_minutes: float = Field(default=18.0, alias="REST_BAR_END_LAG_MINUTES")
+    # Crypto bars don't have the same IEX delay; keep small lag for safety.
+    crypto_rest_bar_end_lag_minutes: float = Field(default=1.0, alias="CRYPTO_REST_BAR_END_LAG_MINUTES")
     bar_buffer_maxlen: int = Field(default=3000, alias="BAR_BUFFER_MAXLEN")
 
     # Market-wide universe (free + efficient): build a liquid universe daily and trade/scan that.

@@ -1008,6 +1008,43 @@ def _run_in_window_trading_cycle(
         if not rd.allow:
             return
 
+        asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
+        if asset_class == "crypto":
+            # Free weekend mode: crypto spot entries via market-by-notional.
+            # Keep it simple (no bracket orders, no shorts). Exits are handled on later ticks.
+            if action != "BUY":
+                return
+            max_notional = float(getattr(settings, "max_notional_per_trade_usd", 0.0) or 0.0)
+            if max_notional <= 0:
+                max_notional = 50.0
+            notional = float(rd.notional_usd or max_notional)
+            if max_notional > 0:
+                notional = min(notional, max_notional)
+            if notional <= 0:
+                return
+
+            if observe_only:
+                risk.register_trade(sym, t0)
+                return
+
+            res = executor.submit_entry_buy_notional_market(symbol=sym, notional_usd=notional)
+            ledger.record_order_intent(
+                ts=t0,
+                symbol=sym,
+                side="buy",
+                notional_usd=float(notional),
+                stop_price=0.0,
+                take_profit_price=0.0,
+                client_order_id=res.client_order_id,
+                alpaca_order_id=res.alpaca_order_id,
+                submitted=res.submitted,
+                reason=res.reason,
+                extra={"action": action, "asset_class": "crypto", "entry_price": float(last_close)},
+            )
+            if res.submitted:
+                risk.register_trade(sym, t0)
+            return
+
         # Volatility gating (regime handling): if current ATR is unusually high vs "monthly" ATR,
         # halve the position size.
         qty_f = float(rd.qty)
@@ -1810,9 +1847,15 @@ def run(
     # Market data: REST polling avoids opening a second Alpaca websocket (trading stream uses one).
     md_mode = (settings.market_data_mode or "rest").strip().lower()
     if scheduled_tick:
-        from alpaca_day_bot.data.rest_bars import RestBarPoller
+        asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
+        if asset_class == "crypto":
+            from alpaca_day_bot.data.crypto_rest_bars import CryptoRestBarPoller
 
-        rp = RestBarPoller(settings, buffer)
+            rp = CryptoRestBarPoller(settings, buffer)
+        else:
+            from alpaca_day_bot.data.rest_bars import RestBarPoller
+
+            rp = RestBarPoller(settings, buffer)
         warmed = rp.warm_buffer(rounds=2, pause_s=1.0)
         log.info("scheduled_tick rest bars warmed events=%s", warmed)
     elif md_mode == "websocket":

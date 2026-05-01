@@ -1,0 +1,47 @@
+# Paper trading: crypto weekend tick (24/7 symbols). Runs only Sat/Sun.
+name: Paper crypto weekend tick
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * 6,0"
+
+concurrency:
+  group: alpaca-paper-crypto-weekend
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Weekend crypto scheduled tick
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          ASSET_CLASS: "crypto"
+          # Keep it small + liquid by default.
+          SYMBOLS: '["BTC/USD","ETH/USD","SOL/USD"]'
+          # Use local indicators (TVTA is equity-focused).
+          INDICATOR_PROVIDER: "local"
+          NEWS_FETCH_ENABLED: "false"
+          UNIVERSE_ENABLED: "false"
+          MODEL_ENABLED: "false"
+          # Conservative weekend sizing (you can raise later).
+          MAX_NOTIONAL_PER_TRADE_USD: "50"
+          MAX_POSITIONS: "5"
+          MAX_TRADES_PER_DAY: "50"
+          MAX_DAILY_LOSS_PCT: "0.01"
+          PER_SYMBOL_COOLDOWN_S: "60"
+          CONFIRM_BARS: "1"
+          SIGNAL_TIMEFRAME: "15m"
+        run: python -m alpaca_day_bot --scheduled-tick
+

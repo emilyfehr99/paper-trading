@@ -192,6 +192,31 @@ class OrderExecutor:
             oid = None
         return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
 
+    def submit_entry_buy_notional_market(self, *, symbol: str, notional_usd: float) -> ExecutionResult:
+        """
+        Crypto-friendly market buy using notional (supports fractional qty implicitly).
+        """
+        if notional_usd <= 0:
+            return ExecutionResult(False, "bad_notional")
+        client_order_id = f"adbot-{uuid.uuid4().hex[:16]}"
+        req = MarketOrderRequest(
+            symbol=symbol,
+            notional=round(float(notional_usd), 2),
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.GTC,
+            client_order_id=client_order_id,
+        )
+        try:
+            order = self._tc.submit_order(order_data=req)
+        except Exception as e:
+            return ExecutionResult(False, f"submit_error:{e}", client_order_id=client_order_id, alpaca_order_id=None)
+        oid = None
+        try:
+            oid = str(getattr(order, "id", None)) if order is not None else None
+        except Exception:
+            oid = None
+        return ExecutionResult(True, "submitted", client_order_id=client_order_id, alpaca_order_id=oid)
+
     def submit_entry_buy_limit(self, *, symbol: str, qty: float, limit_price: float) -> ExecutionResult:
         if qty <= 0:
             return ExecutionResult(False, "bad_qty")
