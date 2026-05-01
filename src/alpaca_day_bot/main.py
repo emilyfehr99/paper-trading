@@ -1937,53 +1937,55 @@ def run(
         try:
             # Flatten before close (avoid overnight holds) — equities only.
             if asset_class != "crypto":
-            try:
-                fb = int(getattr(settings, "flatten_before_close_minutes", 5) or 5)
-            except Exception:
-                fb = 5
-            if fb > 0:
                 try:
-                    from datetime import datetime as _dt, timedelta as _td
-
-                    close_cut = (_dt.combine(market_day, settings.trade_end, tzinfo=settings.tzinfo()) - _td(minutes=fb)).time()
-                    if mt >= close_cut:
-                        for sym in executor.open_position_symbols():
-                            try:
-                                res = executor.close_position_market(sym)
-                                ledger.record_order_intent(
-                                    ts=t0,
-                                    symbol=sym,
-                                    side="close",
-                                    notional_usd=0.0,
-                                    stop_price=0.0,
-                                    take_profit_price=0.0,
-                                    client_order_id=None,
-                                    alpaca_order_id=res.alpaca_order_id,
-                                    submitted=res.submitted,
-                                    reason=f"flatten_before_close:{res.reason}",
-                                    extra={"action": "EXIT_FLATTEN"},
-                                )
-                                if (
-                                    scheduled_tick
-                                    and bool(getattr(settings, "fill_confirm_enabled", True))
-                                    and res.alpaca_order_id
-                                ):
-                                    try:
-                                        evt = executor.poll_order_fill_event(
-                                            order_id=str(res.alpaca_order_id),
-                                            timeout_s=float(getattr(settings, "fill_confirm_timeout_s", 60.0)),
-                                            poll_s=float(getattr(settings, "fill_confirm_poll_s", 3.0)),
-                                        )
-                                        if evt is not None:
-                                            ledger.record_trade_update(evt)
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                continue
-                        # Do not open new trades after flatten window.
-                        in_window = False
+                    fb = int(getattr(settings, "flatten_before_close_minutes", 5) or 5)
                 except Exception:
-                    pass
+                    fb = 5
+                if fb > 0:
+                    try:
+                        from datetime import datetime as _dt, timedelta as _td
+
+                        close_cut = (
+                            _dt.combine(market_day, settings.trade_end, tzinfo=settings.tzinfo()) - _td(minutes=fb)
+                        ).time()
+                        if mt >= close_cut:
+                            for sym in executor.open_position_symbols():
+                                try:
+                                    res = executor.close_position_market(sym)
+                                    ledger.record_order_intent(
+                                        ts=t0,
+                                        symbol=sym,
+                                        side="close",
+                                        notional_usd=0.0,
+                                        stop_price=0.0,
+                                        take_profit_price=0.0,
+                                        client_order_id=None,
+                                        alpaca_order_id=res.alpaca_order_id,
+                                        submitted=res.submitted,
+                                        reason=f"flatten_before_close:{res.reason}",
+                                        extra={"action": "EXIT_FLATTEN"},
+                                    )
+                                    if (
+                                        scheduled_tick
+                                        and bool(getattr(settings, "fill_confirm_enabled", True))
+                                        and res.alpaca_order_id
+                                    ):
+                                        try:
+                                            evt = executor.poll_order_fill_event(
+                                                order_id=str(res.alpaca_order_id),
+                                                timeout_s=float(getattr(settings, "fill_confirm_timeout_s", 60.0)),
+                                                poll_s=float(getattr(settings, "fill_confirm_poll_s", 3.0)),
+                                            )
+                                            if evt is not None:
+                                                ledger.record_trade_update(evt)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    continue
+                            # Do not open new trades after flatten window.
+                            in_window = False
+                    except Exception:
+                        pass
 
             if not in_window:
                 log.info(
