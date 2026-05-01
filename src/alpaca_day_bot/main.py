@@ -1926,14 +1926,17 @@ def run(
         market_now = t0.astimezone(settings.tzinfo())
         market_day = market_now.date()
         mt = market_now.time()
-        in_window = settings.trade_start <= mt <= settings.trade_end
+        asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
+        # Crypto trades 24/7; don't apply US-equities time window gates.
+        in_window = True if asset_class == "crypto" else (settings.trade_start <= mt <= settings.trade_end)
         risk.rehydrate_from_ledger(ledger, market_day, settings.tzinfo())
         equity = executor.get_account_equity()
         gross = executor.gross_exposure_usd()
         ledger.record_equity_snapshot(t0, equity, gross)
         last_report_day = market_day
         try:
-            # Flatten before close (avoid overnight holds)
+            # Flatten before close (avoid overnight holds) — equities only.
+            if asset_class != "crypto":
             try:
                 fb = int(getattr(settings, "flatten_before_close_minutes", 5) or 5)
             except Exception:
