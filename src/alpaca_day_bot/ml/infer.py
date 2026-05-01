@@ -85,6 +85,9 @@ def _flatten_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
     x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
     x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
     x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
+    x["setup_short_rsi_overbought_fade"] = 1.0 if rs == "short_rsi_overbought_fade" else 0.0
+    x["setup_short_bb_upper_fade"] = 1.0 if rs == "short_bb_upper_fade" else 0.0
+    x["setup_short_break_retest"] = 1.0 if rs == "short_break_retest" else 0.0
 
     # News
     if isinstance(news, dict) and isinstance(news.get("articles"), list):

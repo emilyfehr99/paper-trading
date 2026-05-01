@@ -258,6 +258,9 @@ def build_signal_label_dataset(
         x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
         x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
         x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
+        x["setup_short_rsi_overbought_fade"] = 1.0 if rs == "short_rsi_overbought_fade" else 0.0
+        x["setup_short_bb_upper_fade"] = 1.0 if rs == "short_bb_upper_fade" else 0.0
+        x["setup_short_break_retest"] = 1.0 if rs == "short_break_retest" else 0.0
 
         # News bundle features (stored in features["news"] by main tick)
         news = feat.get("news") if isinstance(feat.get("news"), dict) else None

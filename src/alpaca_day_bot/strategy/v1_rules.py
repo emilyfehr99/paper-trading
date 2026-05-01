@@ -258,6 +258,13 @@ class V1RulesSignalEngine(BaseStrategy):
             df = pd.concat([df, macd], axis=1)
         df["vwap_calc"] = _daily_vwap_ny(df)
         df["volume_sma"] = df["volume"].rolling(int(self._volume_sma_len)).mean()
+        # Bollinger bands (used for short fade setups)
+        bb = ta.bbands(df["close"], length=20, std=2.0)
+        if bb is not None:
+            try:
+                df = pd.concat([df, bb], axis=1)
+            except Exception:
+                pass
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(self._atr_len))
         df["atr_avg"] = df["atr"].rolling(int(self._atr_regime_lookback)).mean()
         adx = ta.adx(df["high"], df["low"], df["close"], length=14)
@@ -369,6 +376,53 @@ class V1RulesSignalEngine(BaseStrategy):
             "good_regime": bool(good_regime),
         }
 
+        # Extra short setup signals (so the SHORT model can learn which patterns work).
+        rsinow = float(last["rsi"])
+        rsiprev = None
+        try:
+            rsiprev = float(df["rsi"].iloc[-2]) if len(df) >= 2 else None
+        except Exception:
+            rsiprev = None
+
+        # Mean-reversion: RSI was overbought, then crosses back down.
+        rsi_ob = 80.0 if not self._aggressive_mode else 70.0
+        rsi_ob_cross_down = bool(rsiprev is not None and rsiprev >= rsi_ob and rsinow < rsi_ob)
+
+        # Bollinger band upper fade: price extended to/above upper band.
+        bbu = None
+        try:
+            # Typical pandas-ta column names: BBU_20_2.0
+            bbu_cols = [c for c in df.columns if str(c).upper().startswith("BBU_")]
+            if bbu_cols:
+                v = df[bbu_cols[0]].iloc[-1]
+                bbu = None if pd.isna(v) else float(v)
+        except Exception:
+            bbu = None
+        bb_upper_touch = bool(bbu is not None and float(last["close"]) >= float(bbu))
+
+        # Break-and-retest: break below recent support, then fail a retest under EMA/VWAP.
+        broke_support = False
+        retest_failed = False
+        try:
+            lookback = 20
+            if len(df) >= (lookback + 3):
+                recent_low = float(df["low"].iloc[-(lookback + 2) : -2].min())
+                broke_support = float(df["close"].iloc[-2]) < recent_low
+                # Retest = current bar's high reaches back toward support but closes below EMA/VWAP
+                retest_failed = broke_support and (float(last["high"]) >= recent_low * 0.995) and below_ema and below_vwap
+        except Exception:
+            broke_support = False
+            retest_failed = False
+
+        checks_short.update(
+            {
+                "rsi_ob_cross_down": bool(rsi_ob_cross_down),
+                "bb_upper_touch": bool(bb_upper_touch),
+                "broke_support": bool(broke_support),
+                "retest_failed": bool(retest_failed),
+            }
+        )
+
         features = {
             "close": float(last["close"]),
             "rsi_14": float(last["rsi"]),
@@ -467,6 +521,18 @@ class V1RulesSignalEngine(BaseStrategy):
                 macd_ok_short = (macd_bear_cross or macd_bear) if good_regime else macd_bear_cross
             vwap_ok_short = below_vwap if not self._aggressive_mode else True
             vol_ok_short = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
+
+            # Setup 1: RSI overbought fade (mean reversion) + MACD-first gate
+            if htf_ok_short and rsi_ob_cross_down and macd_ok_short and below_ema and vwap_ok_short and vol_ok_short:
+                return StrategySignal(symbol, "SHORT", "short_rsi_overbought_fade", features=features)
+
+            # Setup 2: Bollinger upper-band fade + MACD-first gate
+            if htf_ok_short and bb_upper_touch and macd_ok_short and below_ema and vwap_ok_short and vol_ok_short:
+                return StrategySignal(symbol, "SHORT", "short_bb_upper_fade", features=features)
+
+            # Setup 3: Break-and-retest failure + MACD-first gate
+            if htf_ok_short and retest_failed and macd_ok_short and below_ema and vwap_ok_short and vol_ok_short:
+                return StrategySignal(symbol, "SHORT", "short_break_retest", features=features)
 
             if htf_ok_short and rsi_rebound and below_ema and macd_ok_short and vwap_ok_short and vol_ok_short:
                 return StrategySignal(symbol, "SHORT", "short_rsi_macd_vwap_volume", features=features)
