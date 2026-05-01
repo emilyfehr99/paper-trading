@@ -12,6 +12,7 @@ from alpaca_day_bot.reporting.trade_why import exit_intents_for_day, trade_whys_
 from alpaca_day_bot.reporting.virtual_options import virtual_options_stats_for_day
 from alpaca_day_bot.reporting.executed_ml import executed_ml_summary
 from alpaca_day_bot.ml.regime_thresholds import learn_regime_min_proba_map
+from alpaca_day_bot.reporting.rollup_health import rollup_health
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,24 @@ def write_daily_report(
     except Exception:
         model_train_lines = []
 
+    # Rollup health (long-lived training dataset)
+    rollup_lines: list[str] = []
+    try:
+        rh = rollup_health(rollup_db_path=str(Path("state/ledgers/ledger_rollup.sqlite3")), state_dir="state")
+        if rh is not None:
+            rollup_lines = [
+                "",
+                "### Rollup health (long-lived training dataset)",
+                f"- **Rollup DB**: `{rh.db_path}`",
+                f"- **Signals (BUY / SHORT)**: {rh.signals_buy} / {rh.signals_short}",
+                f"- **Triple-barrier labels (BUY / SHORT)**: {rh.tb_labels_buy} / {rh.tb_labels_short}",
+                f"- **Executed round trips (total / BUY / SHORT)**: {rh.executed_round_trips_total} / {rh.executed_round_trips_buy} / {rh.executed_round_trips_short}",
+                f"- **Latest BUY model**: {rh.model_buy_status or 'n/a'}",
+                f"- **Latest SHORT model**: {rh.model_short_status or 'n/a'}",
+            ]
+    except Exception:
+        rollup_lines = []
+
     md = model_diagnostics_for_day(db_path, day)
     model_lines: list[str] = []
     if md is not None:
@@ -244,6 +263,7 @@ def write_daily_report(
         f"- **Trade updates (fills)**: {s.trades}",
         *acc_lines,
         *model_train_lines,
+        *rollup_lines,
         *model_lines,
         *trade_lines,
         *exec_lines,

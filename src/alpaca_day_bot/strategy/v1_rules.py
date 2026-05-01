@@ -554,8 +554,10 @@ class V1RulesSignalEngine(BaseStrategy):
                     return StrategySignal(symbol, "SHORT", "short_aggr_3of4", features=features)
 
                 # Setup D (max frequency): "2-of-4" confirmation for shorts.
-                if htf_ok_short and rsi_ok and checks >= 2:
-                    return StrategySignal(symbol, "SHORT", "short_aggr_2of4", features=features)
+                # Disabled: this setup has been consistently poor in extracted results.
+                # Keep the signal logic for diagnostics (rule_votes), but do not enter trades on it.
+                # if htf_ok_short and rsi_ok and checks >= 2:
+                #     return StrategySignal(symbol, "SHORT", "short_aggr_2of4", features=features)
 
         # HOLD reason (keep it informative)
         if not htf_ok_long and not (self._enable_shorts and htf_ok_short):
