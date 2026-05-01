@@ -56,11 +56,22 @@ def train_and_save(
     out_path: str,
     min_horizon_minutes: float = 15.0,
     min_rows: int = 50,
+    action: str = "BUY",  # BUY | SHORT
+    min_class_count: int = 30,
 ) -> dict:
+    act = (action or "").strip().upper() or "BUY"
+    if act not in ("BUY", "SHORT"):
+        act = "BUY"
+
     # Prefer executed-trade dataset (real fills) when enough trades exist.
     exec_ds = None
     try:
-        exec_ds = build_executed_trade_dataset(db_path=db_path, min_trades=max(5, int(min_rows)))
+        want_dir = "long" if act == "BUY" else "short"
+        exec_ds = build_executed_trade_dataset(
+            db_path=db_path,
+            min_trades=max(10, int(min_rows)),
+            direction=want_dir,
+        )
     except Exception:
         exec_ds = None
 
@@ -69,11 +80,10 @@ def train_and_save(
         X = exec_ds.X
         y = exec_ds.y
         meta = exec_ds.meta
-        ds_kind = "executed_trades"
+        ds_kind = f"executed_trades:{'long' if act == 'BUY' else 'short'}"
     else:
-        ds = build_signal_label_dataset(
-            db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=("BUY", "SHORT")
-        )
+        # Fall back to triple-barrier / forward-return labels from signals.
+        ds = build_signal_label_dataset(db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=(act,))
         X = ds.X
         y = ds.y
         meta = ds.meta
@@ -92,6 +102,33 @@ def train_and_save(
             "n_labeled": int(len(X)),
             "min_required": int(min_rows),
             "dataset_kind": ds_kind,
+            "action": act,
+        }
+        (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
+    # Refuse to train on one-class or tiny-class datasets (noise fitting hurts accuracy).
+    try:
+        y_int = [int(v) for v in list(y)]
+        n_pos = int(sum(1 for v in y_int if v == 1))
+        n_neg = int(sum(1 for v in y_int if v == 0))
+    except Exception:
+        n_pos, n_neg = 0, 0
+    if min(n_pos, n_neg) < int(min_class_count):
+        outp = Path(out_path)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+            "db_path": db_path,
+            "min_horizon_minutes": float(min_horizon_minutes),
+            "skipped": True,
+            "skip_reason": "insufficient_class_balance",
+            "n_labeled": int(len(X)),
+            "n_pos": int(n_pos),
+            "n_neg": int(n_neg),
+            "min_class_count": int(min_class_count),
+            "dataset_kind": ds_kind,
+            "action": act,
         }
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -162,6 +199,7 @@ def train_and_save(
             "min_horizon_minutes": float(min_horizon_minutes),
             "provider": provider,
             "dataset_kind": ds_kind,
+            "action": act,
             "metrics": asdict(metrics),
             "extra_metrics": {},
             "recommended_min_proba": 0.5,
@@ -361,6 +399,7 @@ def train_and_save(
         "min_horizon_minutes": float(min_horizon_minutes),
         "provider": provider,
         "dataset_kind": ds_kind,
+        "action": act,
         "metrics": asdict(metrics),
         "extra_metrics": extra_metrics,
         "recommended_min_proba": best_thr,
@@ -377,8 +416,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", required=True, help="Path to ledger.sqlite3")
     ap.add_argument("--out", required=True, help="Output model artifact path (joblib)")
+    ap.add_argument("--action", default="BUY", help="Which side to train: BUY or SHORT")
     ap.add_argument("--min-horizon-minutes", type=float, default=15.0)
-    ap.add_argument("--min-rows", type=int, default=50, help="Minimum labeled rows required to train")
+    ap.add_argument("--min-rows", type=int, default=200, help="Minimum labeled rows required to train")
+    ap.add_argument(
+        "--min-class-count",
+        type=int,
+        default=30,
+        help="Minimum examples required for BOTH classes (pos/neg) to train (avoid fitting noise).",
+    )
     args = ap.parse_args()
 
     meta = train_and_save(
@@ -386,6 +432,8 @@ def main() -> None:
         out_path=args.out,
         min_horizon_minutes=float(args.min_horizon_minutes),
         min_rows=int(args.min_rows),
+        action=str(args.action),
+        min_class_count=int(args.min_class_count),
     )
     print(json.dumps(meta, indent=2))
 

@@ -140,6 +140,8 @@ jobs:
           MODEL_MIN_PROBA: "0.60"
           MODEL_MIN_PROBA_LONG: "0.60"
           MODEL_MIN_PROBA_SHORT: "0.70"
+          MODEL_PATH_LONG: "state/models/latest_buy.joblib"
+          MODEL_PATH_SHORT: "state/models/latest_short.joblib"
           # Unblock trades with low historical trade count (bootstrap phase)
           MIN_EXECUTED_ROUND_TRIPS_FOR_MODEL: "0"
           # Submit more top-ranked candidates per 15m tick (more fills, still gated by rules+news).
@@ -194,9 +196,19 @@ jobs:
         run: |
           python -m alpaca_day_bot.ml.train \
             --db state/ledger.sqlite3 \
-            --out state/models/latest.joblib \
+            --out state/models/latest_buy.joblib \
+            --action BUY \
             --min-horizon-minutes 15 \
-            --min-rows 1
+            --min-rows 300 \
+            --min-class-count 50
+
+          python -m alpaca_day_bot.ml.train \
+            --db state/ledger.sqlite3 \
+            --out state/models/latest_short.joblib \
+            --action SHORT \
+            --min-horizon-minutes 15 \
+            --min-rows 300 \
+            --min-class-count 50
 
       - name: Upload state artifact (debug / backup)
         if: always()

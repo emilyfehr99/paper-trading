@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     model_min_proba_long: float = Field(default=0.55, alias="MODEL_MIN_PROBA_LONG")
     model_min_proba_short: float = Field(default=0.65, alias="MODEL_MIN_PROBA_SHORT")
     top_n_per_tick: int = Field(default=2, alias="TOP_N_PER_TICK")
+    # Per-side models (preferred). MODEL_PATH remains for backward compatibility.
+    model_path_long: str = Field(default="state/models/latest_buy.joblib", alias="MODEL_PATH_LONG")
+    model_path_short: str = Field(default="state/models/latest_short.joblib", alias="MODEL_PATH_SHORT")
     model_path: str = Field(default="state/models/latest.joblib", alias="MODEL_PATH")
 
     # Exits (bracket-like)

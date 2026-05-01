@@ -347,13 +347,22 @@ def _run_in_window_trading_cycle(
     gross = executor.gross_exposure_usd()
     open_positions = executor.open_positions_count()
 
-    # Load ML bundle early so exits can use it too.
-    ml_bundle = None
+    # Load ML bundles early so entries/exits can use them (separate BUY vs SHORT models).
+    ml_bundle_buy = None
+    ml_bundle_short = None
     if bool(getattr(settings, "model_enabled", False)):
-        mp = getattr(settings, "model_path", "state/models/latest.joblib")
-        ml_bundle = _load_ml_model(mp)
-        if ml_bundle is None:
-            log.warning("ml_model_not_loaded path=%s", mp)
+        mp_buy = getattr(settings, "model_path_long", "") or ""
+        mp_short = getattr(settings, "model_path_short", "") or ""
+        ml_bundle_buy = _load_ml_model(mp_buy) if mp_buy else None
+        ml_bundle_short = _load_ml_model(mp_short) if mp_short else None
+        if ml_bundle_buy is None and ml_bundle_short is None:
+            # Back-compat: try single-model path.
+            mp = getattr(settings, "model_path", "state/models/latest.joblib")
+            ml = _load_ml_model(mp)
+            ml_bundle_buy = ml
+            ml_bundle_short = ml
+            if ml is None:
+                log.warning("ml_model_not_loaded paths=%s,%s,%s", mp_buy, mp_short, mp)
 
     # Per-cycle caches (avoid repeated external calls in a single scheduled tick).
     taapi_cache: dict[str, dict] = {}
@@ -1386,9 +1395,12 @@ def _run_in_window_trading_cycle(
                 pass
 
         # ML scoring (filter + rank): score candidates but don't submit yet.
-        if action in ("BUY", "SHORT") and ml_bundle is not None:
-            # is_buy feature: for now, model is trained on BUY labels; we still score SHORTs but treat them separately later
-            md = _ml_predict_proba(model_bundle=ml_bundle, features={**feat, "is_buy": 1.0 if action == "BUY" else 0.0})
+        ml_for_action = (ml_bundle_buy if action == "BUY" else ml_bundle_short)
+        if action in ("BUY", "SHORT") and ml_for_action is not None:
+            md = _ml_predict_proba(
+                model_bundle=ml_for_action,
+                features={**feat, "action": action, "signal_action": action, "is_buy": 1.0 if action == "BUY" else 0.0},
+            )
             feat["model"] = {"ok": md.ok, "provider": md.provider, "proba": md.proba, "error": md.error}
             if md.ok and md.proba is not None:
                 feat["model_proba"] = float(md.proba)
@@ -1411,7 +1423,7 @@ def _run_in_window_trading_cycle(
 
         _try_submit_entry(sym=sym, action=action, feat=feat, df_1m=df_1m)
 
-    if ml_bundle is not None and candidates_for_ml:
+    if (ml_bundle_buy is not None or ml_bundle_short is not None) and candidates_for_ml:
         _apply_ml_filter_rank_and_trade(
             settings=settings,
             observe_only=observe_only,

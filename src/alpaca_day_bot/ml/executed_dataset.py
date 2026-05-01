@@ -86,6 +86,7 @@ def build_executed_trade_dataset(
     db_path: str,
     max_signal_age_minutes: float = 30.0,
     min_trades: int = 5,
+    direction: str | None = None,  # long | short | None
 ) -> ExecutedDatasetResult | None:
     """
     Build dataset from EXECUTED fills:
@@ -114,7 +115,10 @@ def build_executed_trade_dataset(
     y_rows: list[int] = []
     meta_rows: list[dict[str, Any]] = []
 
+    want_dir = (direction or "").strip().lower() or None
     for rt in rts:
+        if want_dir in ("long", "short") and str(rt.direction).strip().lower() != want_dir:
+            continue
         feat = _nearest_signal_before(
             signals,
             symbol=rt.symbol,
