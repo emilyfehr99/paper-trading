@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     universe_master_max_symbols: int = Field(default=5000, alias="UNIVERSE_MASTER_MAX_SYMBOLS")
     universe_master_require_shortable: bool = Field(default=False, alias="UNIVERSE_MASTER_REQUIRE_SHORTABLE")
 
+    # Intraday prefilter: keep master/liquid universe large, but only *scan* a smaller
+    # subset each tick to avoid rate limits/timeouts.
+    prefilter_enabled: bool = Field(default=False, alias="PREFILTER_ENABLED")
+    prefilter_max_symbols: int = Field(default=400, alias="PREFILTER_MAX_SYMBOLS")
+    prefilter_method: str = Field(default="movers_actives", alias="PREFILTER_METHOD")  # movers_actives
+
     # Run modes
     observe_only: bool = Field(default=False, alias="OBSERVE_ONLY")
 
@@ -171,6 +177,8 @@ class Settings(BaseSettings):
     # Signal "accuracy": label BUY rows with forward return vs signal-time close after min wall-clock age.
     signal_accuracy_enabled: bool = Field(default=True, alias="SIGNAL_ACCURACY_ENABLED")
     signal_accuracy_min_age_minutes: float = Field(default=15.0, alias="SIGNAL_ACCURACY_MIN_AGE_MINUTES")
+    # Prefer triple-barrier labels (aligned to TP/SL); forward-return labels are optional and can be disabled.
+    label_forward_returns_enabled: bool = Field(default=True, alias="LABEL_FORWARD_RETURNS_ENABLED")
 
     # Robustness: smaller cost grid / walk-forward / sweep (GitHub Actions sets true by default in workflow).
     robustness_light: bool = Field(default=False, alias="ROBUSTNESS_LIGHT")

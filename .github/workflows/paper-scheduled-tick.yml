@@ -142,12 +142,16 @@ jobs:
           MODEL_MIN_PROBA_SHORT: "0.70"
           MODEL_PATH_LONG: "state/models/latest_buy.joblib"
           MODEL_PATH_SHORT: "state/models/latest_short.joblib"
-          # Unblock trades with low historical trade count (bootstrap phase)
-          MIN_EXECUTED_ROUND_TRIPS_FOR_MODEL: "0"
+          # Don't let ML influence gating until we have enough executed outcomes.
+          MIN_EXECUTED_ROUND_TRIPS_FOR_MODEL: "50"
           # Submit more top-ranked candidates per 15m tick (more fills, still gated by rules+news).
           TOP_N_PER_TICK: "6"
           # MACD is now the primary directional gate for entries.
           MACD_CONFIRM_MODE: "aligned_good_regime_else_cross"
+          # Keep universe huge, but scan a small subset each tick.
+          PREFILTER_ENABLED: "true"
+          PREFILTER_METHOD: "movers_actives"
+          PREFILTER_MAX_SYMBOLS: "400"
           UNIVERSE_ENABLED: "true"
           ENABLE_SHORTS: "true"
           AGGRESSIVE_MODE: "true"
@@ -178,6 +182,8 @@ jobs:
           VOLUME_CONFIRM_MULT: "0.75"
           # Label immediately so ML can start training sooner (paper only).
           SIGNAL_ACCURACY_MIN_AGE_MINUTES: "60"
+          # Use triple-barrier only (consistent target aligned to TP/SL).
+          LABEL_FORWARD_RETURNS_ENABLED: "false"
           # Free IEX bars are delayed; align the strategy to 15m cadence.
           SIGNAL_TIMEFRAME: "15m"
           # Slower holds reduce noise from delayed bars.

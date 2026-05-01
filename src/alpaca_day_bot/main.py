@@ -43,6 +43,7 @@ from alpaca_day_bot.universe import (
     build_master_universe_assets,
     build_liquid_universe,
     filter_universe_symbols_by_max_price,
+    intraday_prefilter_symbols,
     load_universe_symbols,
 )
 
@@ -155,6 +156,8 @@ def _label_signals_forward_returns(
     market_day: date,
 ) -> None:
     if not settings.signal_accuracy_enabled:
+        return
+    if not bool(getattr(settings, "label_forward_returns_enabled", True)):
         return
     pending = ledger.list_unlabeled_signal_rows(
         market_day=market_day,
@@ -1370,6 +1373,11 @@ def _run_in_window_trading_cycle(
             feat["indicator_provider"] = (settings.indicator_provider or "").strip().lower() or None
         except Exception:
             pass
+        # Persist signal timestamp so ml.infer time-of-day features aren't NaN.
+        try:
+            feat["ts"] = t0.isoformat()
+        except Exception:
+            pass
         _maybe_add_taapi_features(sym=sym, feat=feat)
         _maybe_add_tvta_features(sym=sym, feat=feat)
         nf = _maybe_add_news_features(sym=sym, feat=feat)
@@ -1655,6 +1663,30 @@ def run(
                 settings.symbols = u  # type: ignore[assignment]
         except Exception:
             pass
+
+    # Intraday prefilter: reduce the scan set BEFORE we warm bars / call TVTA/news/ML.
+    # This keeps the master/liquid universe large but makes per-tick execution practical.
+    try:
+        asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
+        if scheduled_tick and asset_class == "equity" and bool(getattr(settings, "prefilter_enabled", False)):
+            pf_n = int(getattr(settings, "prefilter_max_symbols", 400) or 400)
+            pf_m = str(getattr(settings, "prefilter_method", "movers_actives") or "movers_actives")
+            pre = intraday_prefilter_symbols(
+                apca_api_key_id=settings.apca_api_key_id,
+                apca_api_secret_key=settings.apca_api_secret_key,
+                method=pf_m,
+                max_symbols=pf_n,
+            )
+            if pre:
+                base_set = {str(s).strip().upper() for s in (settings.symbols or []) if str(s).strip()}
+                pre_u = [s for s in pre if s in base_set] or pre
+                settings.symbols = pre_u  # type: ignore[assignment]
+                log.info(
+                    "prefilter_applied",
+                    extra={"extra_json": {"method": pf_m, "requested": pf_n, "selected": len(pre_u)}},
+                )
+    except Exception:
+        pass
 
     # CLI flag wins.
     observe_only = bool(settings.observe_only) or observe_only_override

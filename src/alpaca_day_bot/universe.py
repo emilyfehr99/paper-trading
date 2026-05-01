@@ -122,6 +122,65 @@ def build_master_universe_assets(
     return payload
 
 
+def intraday_prefilter_symbols(
+    *,
+    apca_api_key_id: str,
+    apca_api_secret_key: str,
+    method: str = "movers_actives",
+    max_symbols: int = 400,
+) -> list[str]:
+    """
+    Cheap per-tick prefilter to avoid scanning thousands of symbols.
+    Uses Alpaca screener endpoints (most-actives + movers) which are capped but fast.
+    """
+    m = (method or "movers_actives").strip().lower()
+    if m != "movers_actives":
+        m = "movers_actives"
+
+    try:
+        from alpaca.data.historical import ScreenerClient
+        from alpaca.data.requests import MarketMoversRequest, MostActivesRequest
+    except Exception:
+        return []
+
+    sc = ScreenerClient(apca_api_key_id, apca_api_secret_key)
+    out: list[str] = []
+
+    # Screener API caps:
+    # - most-actives: top <= 100
+    # - movers: top <= 50
+    top_n = max(50, min(int(max_symbols), 100))
+    try:
+        ma = sc.get_most_actives(MostActivesRequest(top=top_n))
+        for row in getattr(ma, "most_actives", []) or []:
+            s = str(getattr(row, "symbol", "") or "").strip().upper()
+            if s:
+                out.append(s)
+    except Exception:
+        pass
+
+    try:
+        mv = sc.get_market_movers(MarketMoversRequest(top=min(50, top_n)))
+        for row in (getattr(mv, "gainers", []) or []) + (getattr(mv, "losers", []) or []):
+            s = str(getattr(row, "symbol", "") or "").strip().upper()
+            if s:
+                out.append(s)
+    except Exception:
+        pass
+
+    # Deduplicate/preserve order; keep under max_symbols.
+    seen = set()
+    uniq: list[str] = []
+    for s in out:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+        if len(uniq) >= int(max_symbols):
+            break
+    return uniq
+
+
 def build_liquid_universe(
     *,
     apca_api_key_id: str,
