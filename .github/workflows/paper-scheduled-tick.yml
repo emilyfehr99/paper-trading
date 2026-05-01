@@ -118,8 +118,9 @@ jobs:
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           UNIVERSE_ENABLED: "true"
           # Focused universe to stay within API rate limits
-          UNIVERSE_MAX_SYMBOLS: "100"
-          UNIVERSE_MIN_AVG_DOLLAR_VOL: "20000000"
+          # Target "likely day-traded" names: broader set, high liquidity floor.
+          UNIVERSE_MAX_SYMBOLS: "1000"
+          UNIVERSE_MIN_AVG_DOLLAR_VOL: "50000000"
           UNIVERSE_MIN_PRICE: "5"
         run: python -m alpaca_day_bot --build-universe
 
