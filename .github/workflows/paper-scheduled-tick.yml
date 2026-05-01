@@ -97,6 +97,14 @@ jobs:
             alpaca-paper-models-${{ runner.os }}-${{ steps.nydate.outputs.d }}-
             alpaca-paper-models-${{ runner.os }}-
 
+      - uses: actions/cache@v4
+        with:
+          path: state/ledgers
+          key: alpaca-paper-ledgers-${{ runner.os }}-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
+          restore-keys: |
+            alpaca-paper-ledgers-${{ runner.os }}-${{ steps.nydate.outputs.d }}-
+            alpaca-paper-ledgers-${{ runner.os }}-
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -216,6 +224,32 @@ jobs:
             --min-rows 300 \
             --min-class-count 50
 
+      - name: Update rolling ledger datasets (monthly + all-time)
+        if: always()
+        env:
+          NY_DATE: ${{ steps.nydate.outputs.d }}
+        run: |
+          python - << 'PY'
+          import os
+          from pathlib import Path
+          from datetime import datetime
+          
+          ny = (os.environ.get("NY_DATE") or "").strip()
+          month = ny[:7] if len(ny) >= 7 else datetime.utcnow().strftime("%Y-%m")
+          state = Path("state")
+          led = state / "ledgers"
+          led.mkdir(parents=True, exist_ok=True)
+          
+          src = state / "ledger.sqlite3"
+          dst_all = led / "ledger_rollup.sqlite3"
+          dst_month = led / f"ledger_rollup_{month}.sqlite3"
+          
+          import subprocess
+          subprocess.check_call(["python", "tools/rollup_ledger.py", "--src", str(src), "--dst", str(dst_all)])
+          subprocess.check_call(["python", "tools/rollup_ledger.py", "--src", str(src), "--dst", str(dst_month)])
+          print("rolled_up", {"all": str(dst_all), "month": str(dst_month)})
+          PY
+
       - name: Upload state artifact (debug / backup)
         if: always()
         uses: actions/upload-artifact@v4
@@ -230,6 +264,22 @@ jobs:
         with:
           name: alpaca-state-latest-${{ steps.nydate.outputs.d }}
           path: state/
+          if-no-files-found: ignore
+
+      - name: Upload rolling ledger snapshot (latest)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-ledger-rollup-latest
+          path: state/ledgers/ledger_rollup.sqlite3
+          if-no-files-found: warn
+
+      - name: Upload rolling ledger snapshot (monthly)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-ledger-rollup-${{ steps.nydate.outputs.d }}
+          path: state/ledgers/ledger_rollup_*.sqlite3
           if-no-files-found: ignore
 
       - name: Upload reports artifact (daily/weekly)

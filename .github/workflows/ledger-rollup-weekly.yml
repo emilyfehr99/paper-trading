@@ -1,0 +1,67 @@
+name: Ledger rollup weekly (training dataset)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Sundays 03:30 UTC
+    - cron: "30 3 * * 0"
+
+concurrency:
+  group: alpaca-ledger-rollup-weekly
+  cancel-in-progress: false
+
+jobs:
+  rollup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: alpaca-paper-state-${{ runner.os }}-weekly-${{ github.run_id }}
+          restore-keys: |
+            alpaca-paper-state-${{ runner.os }}-
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Train models from rolling ledger
+        run: |
+          python -m alpaca_day_bot.ml.train \
+            --db state/ledgers/ledger_rollup.sqlite3 \
+            --out state/models/latest_buy.joblib \
+            --action BUY \
+            --min-horizon-minutes 15 \
+            --min-rows 300 \
+            --min-class-count 50
+
+          python -m alpaca_day_bot.ml.train \
+            --db state/ledgers/ledger_rollup.sqlite3 \
+            --out state/models/latest_short.joblib \
+            --action SHORT \
+            --min-horizon-minutes 15 \
+            --min-rows 300 \
+            --min-class-count 50
+
+      - name: Upload rolling training dataset
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-ledger-rollup-latest
+          path: state/ledgers/ledger_rollup.sqlite3
+          if-no-files-found: warn
+
+      - name: Upload monthly rollup ledger(s)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpaca-ledger-rollup-monthly
+          path: state/ledgers/ledger_rollup_*.sqlite3
+          if-no-files-found: ignore
+
