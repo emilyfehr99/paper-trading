@@ -258,6 +258,9 @@ class V1RulesSignalEngine(BaseStrategy):
         df["volume_sma"] = df["volume"].rolling(int(self._volume_sma_len)).mean()
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(self._atr_len))
         df["atr_avg"] = df["atr"].rolling(int(self._atr_regime_lookback)).mean()
+        adx = ta.adx(df["high"], df["low"], df["close"], length=14)
+        if adx is not None:
+            df = pd.concat([df, adx], axis=1)
 
         last = df.iloc[-1]
         # Guard against NaNs from warmup
@@ -290,8 +293,30 @@ class V1RulesSignalEngine(BaseStrategy):
         if atr_avg > 1e-12 and atr > atr_avg * float(self._atr_regime_max_mult):
             return StrategySignal(symbol, "HOLD", "atr_regime_spike")
 
+        # Regime (approx): allow slightly looser confirmation only in trend + low vol.
+        adx_v = None
+        try:
+            if "ADX_14" in df.columns:
+                adx_v = float(df["ADX_14"].iloc[-1])
+        except Exception:
+            adx_v = None
+        atr_ratio = None
+        try:
+            if atr_avg and atr_avg > 1e-12:
+                atr_ratio = float(atr) / float(atr_avg)
+        except Exception:
+            atr_ratio = None
+        is_trend = bool(adx_v is not None and adx_v >= 22.0)
+        is_low_vol = bool(atr_ratio is not None and atr_ratio < 1.15)
+        good_regime = bool(is_trend and is_low_vol)
+
         # Core entry conditions
-        rsi_pullback = float(last["rsi"]) <= float(self._rsi_pullback_max)
+        rsi_v = float(last["rsi"])
+        rsi_pb_max = float(self._rsi_pullback_max)
+        # Slightly widen the pullback window only in good regimes.
+        if good_regime:
+            rsi_pb_max = min(60.0, rsi_pb_max + 5.0)
+        rsi_pullback = rsi_v <= rsi_pb_max
         above_ema = float(last["close"]) > float(last["ema_20"])
         below_ema = float(last["close"]) < float(last["ema_20"])
 
@@ -329,6 +354,7 @@ class V1RulesSignalEngine(BaseStrategy):
             "macd_bull": bool(macd_bull),
             "above_vwap": bool(above_vwap),
             "volume_confirm": bool(volume_confirm),
+            "good_regime": bool(good_regime),
         }
         checks_short = {
             "htf_ok_short": bool(htf_ok_short),
@@ -338,6 +364,7 @@ class V1RulesSignalEngine(BaseStrategy):
             "macd_bear": bool(macd_bear),
             "below_vwap": bool(below_vwap),
             "volume_confirm": bool(volume_confirm),
+            "good_regime": bool(good_regime),
         }
 
         features = {
@@ -363,6 +390,8 @@ class V1RulesSignalEngine(BaseStrategy):
             "atr_monthly": (float(last.get("atr_monthly")) if not pd.isna(last.get("atr_monthly")) else atr_avg),
             "htf_ok_long": bool(htf_ok_long),
             "htf_ok_short": bool(htf_ok_short),
+            "adx_14": (None if adx_v is None else float(adx_v)),
+            "atr_ratio": (None if atr_ratio is None else float(atr_ratio)),
             "strategy": {
                 "name": "v1_rules",
                 "signal_timeframe": str(self._signal_timeframe),
@@ -384,7 +413,12 @@ class V1RulesSignalEngine(BaseStrategy):
         }
 
         # Long entry
-        macd_ok_long = macd_bull_cross if not self._aggressive_mode else (macd_bull_cross or macd_bull)
+        # Accuracy-focused frequency: in a good regime, allow MACD alignment (MACD>signal)
+        # instead of requiring a strict last-bar cross.
+        if good_regime:
+            macd_ok_long = macd_bull_cross or macd_bull
+        else:
+            macd_ok_long = macd_bull_cross if not self._aggressive_mode else (macd_bull_cross or macd_bull)
         vwap_ok_long = above_vwap if not self._aggressive_mode else True
         vol_ok_long = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
 
@@ -418,7 +452,10 @@ class V1RulesSignalEngine(BaseStrategy):
         # Short entry (optional)
         if self._enable_shorts:
             rsi_rebound = float(last["rsi"]) >= float(self._rsi_rebound_min_short)
-            macd_ok_short = macd_bear_cross if not self._aggressive_mode else (macd_bear_cross or macd_bear)
+            if good_regime:
+                macd_ok_short = macd_bear_cross or macd_bear
+            else:
+                macd_ok_short = macd_bear_cross if not self._aggressive_mode else (macd_bear_cross or macd_bear)
             vwap_ok_short = below_vwap if not self._aggressive_mode else True
             vol_ok_short = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
 
@@ -452,7 +489,11 @@ class V1RulesSignalEngine(BaseStrategy):
             return StrategySignal(symbol, "HOLD", "rsi_no_pullback", features=features)
         if not above_ema and not (self._enable_shorts and below_ema):
             return StrategySignal(symbol, "HOLD", "ema_filter", features=features)
-        if not (macd_bull_cross or (self._enable_shorts and macd_bear_cross)):
+        if not (
+            macd_bull_cross
+            or (good_regime and macd_bull)
+            or (self._enable_shorts and (macd_bear_cross or (good_regime and macd_bear)))
+        ):
             return StrategySignal(symbol, "HOLD", "macd_no_cross", features=features)
         if not (above_vwap or (self._enable_shorts and below_vwap)):
             return StrategySignal(symbol, "HOLD", "vwap_filter", features=features)
