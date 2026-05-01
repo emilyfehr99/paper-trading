@@ -209,13 +209,13 @@ jobs:
         if: always()
         id: traindb
         run: |
-          python3 << 'PY'
+          python3 << 'PY' > /tmp/traindb.txt
           import sqlite3
           from pathlib import Path
-          
+
           rollup = Path("state/ledgers/ledger_rollup.sqlite3")
           fallback = Path("state/ledger.sqlite3")
-          
+
           def tb_labels_n(db: Path) -> int:
               if not db.exists():
                   return 0
@@ -227,15 +227,15 @@ jobs:
                   return 0
               finally:
                   conn.close()
-          
+
           # Require a meaningful amount of labeled data before trusting the rollup for training.
-          # (We still train from the per-run ledger to keep things moving early on.)
           min_tb = 300
           use = rollup if tb_labels_n(rollup) >= min_tb else fallback
-          print("selected_train_db", str(use))
-          with open("${GITHUB_OUTPUT}", "a", encoding="utf-8") as f:
-              f.write(f"db={use.as_posix()}\n")
+          print(use.as_posix())
           PY
+          DB="$(cat /tmp/traindb.txt | tail -n 1 | tr -d '\r')"
+          echo "selected_train_db=$DB"
+          echo "db=$DB" >> "$GITHUB_OUTPUT"
 
       - name: Train/update ML model (from latest labels)
         if: always()
