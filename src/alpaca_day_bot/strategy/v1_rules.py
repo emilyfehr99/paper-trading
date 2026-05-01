@@ -33,6 +33,7 @@ class V1RulesSignalEngine(BaseStrategy):
         atr_regime_lookback: int = 50,
         atr_regime_max_mult: float = 2.0,
         signal_timeframe: str = "15m",
+        macd_confirm_mode: str = "aligned_good_regime_else_cross",
     ) -> None:
         self._rsi_pullback_max = rsi_pullback_max
         self._ema_trend_len = ema_trend_len
@@ -48,6 +49,7 @@ class V1RulesSignalEngine(BaseStrategy):
         self._atr_regime_lookback = atr_regime_lookback
         self._atr_regime_max_mult = atr_regime_max_mult
         self._signal_timeframe = (signal_timeframe or "15m").strip().lower()
+        self._macd_confirm_mode = (macd_confirm_mode or "aligned_good_regime_else_cross").strip().lower()
 
     def evaluate_setup(self, *, symbol: str, df_1m, df_15m) -> dict[str, Any]:
         """
@@ -396,6 +398,7 @@ class V1RulesSignalEngine(BaseStrategy):
                 "name": "v1_rules",
                 "signal_timeframe": str(self._signal_timeframe),
                 "aggressive_mode": bool(self._aggressive_mode),
+                "macd_confirm_mode": str(self._macd_confirm_mode),
             },
             "rule_votes": {"long": checks_long, "short": checks_short},
             "indicators_used": [
@@ -413,12 +416,16 @@ class V1RulesSignalEngine(BaseStrategy):
         }
 
         # Long entry
-        # Accuracy-focused frequency: in a good regime, allow MACD alignment (MACD>signal)
-        # instead of requiring a strict last-bar cross.
-        if good_regime:
-            macd_ok_long = macd_bull_cross or macd_bull
+        # MACD as the *primary* gate (configurable).
+        # cross is very selective; aligned is more stable; default uses aligned only in good regimes.
+        mode = self._macd_confirm_mode
+        if mode == "cross":
+            macd_ok_long = macd_bull_cross
+        elif mode == "aligned":
+            macd_ok_long = macd_bull
         else:
-            macd_ok_long = macd_bull_cross if not self._aggressive_mode else (macd_bull_cross or macd_bull)
+            # aligned_good_regime_else_cross
+            macd_ok_long = (macd_bull_cross or macd_bull) if good_regime else macd_bull_cross
         vwap_ok_long = above_vwap if not self._aggressive_mode else True
         vol_ok_long = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
 
@@ -452,10 +459,12 @@ class V1RulesSignalEngine(BaseStrategy):
         # Short entry (optional)
         if self._enable_shorts:
             rsi_rebound = float(last["rsi"]) >= float(self._rsi_rebound_min_short)
-            if good_regime:
-                macd_ok_short = macd_bear_cross or macd_bear
+            if mode == "cross":
+                macd_ok_short = macd_bear_cross
+            elif mode == "aligned":
+                macd_ok_short = macd_bear
             else:
-                macd_ok_short = macd_bear_cross if not self._aggressive_mode else (macd_bear_cross or macd_bear)
+                macd_ok_short = (macd_bear_cross or macd_bear) if good_regime else macd_bear_cross
             vwap_ok_short = below_vwap if not self._aggressive_mode else True
             vol_ok_short = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
 
@@ -489,11 +498,7 @@ class V1RulesSignalEngine(BaseStrategy):
             return StrategySignal(symbol, "HOLD", "rsi_no_pullback", features=features)
         if not above_ema and not (self._enable_shorts and below_ema):
             return StrategySignal(symbol, "HOLD", "ema_filter", features=features)
-        if not (
-            macd_bull_cross
-            or (good_regime and macd_bull)
-            or (self._enable_shorts and (macd_bear_cross or (good_regime and macd_bear)))
-        ):
+        if not (macd_ok_long or (self._enable_shorts and macd_ok_short)):
             return StrategySignal(symbol, "HOLD", "macd_no_cross", features=features)
         if not (above_vwap or (self._enable_shorts and below_vwap)):
             return StrategySignal(symbol, "HOLD", "vwap_filter", features=features)

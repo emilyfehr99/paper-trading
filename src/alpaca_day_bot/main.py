@@ -1702,6 +1702,7 @@ def run(
         rsi_rebound_min_short=settings.rsi_rebound_min_short,
         aggressive_mode=False,
         signal_timeframe=getattr(settings, "signal_timeframe", "15m"),
+        macd_confirm_mode=getattr(settings, "macd_confirm_mode", "aligned_good_regime_else_cross"),
     )
     strategy_aggr = V1RulesSignalEngine(
         rsi_pullback_max=settings.rsi_pullback_max,
@@ -1713,6 +1714,7 @@ def run(
         rsi_rebound_min_short=settings.rsi_rebound_min_short,
         aggressive_mode=True,
         signal_timeframe=getattr(settings, "signal_timeframe", "15m"),
+        macd_confirm_mode=getattr(settings, "macd_confirm_mode", "aligned_good_regime_else_cross"),
     )
 
     if build_universe:

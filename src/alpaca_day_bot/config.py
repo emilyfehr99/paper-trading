@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     htf_rsi_min: float = Field(default=45.0, alias="HTF_RSI_MIN")
     atr_regime_max_mult: float = Field(default=2.5, alias="ATR_REGIME_MAX_MULT")
     aggressive_mode: bool = Field(default=False, alias="AGGRESSIVE_MODE")
+    # How MACD is used as the *primary* directional gate for entries.
+    # - cross: require last-bar cross (very selective; few trades)
+    # - aligned: require MACD>signal for longs (or < for shorts) (more stable, still MACD-driven)
+    # - aligned_good_regime_else_cross: aligned in trend+low-vol, cross otherwise (best default)
+    macd_confirm_mode: str = Field(default="aligned_good_regime_else_cross", alias="MACD_CONFIRM_MODE")
     indicator_provider: str = Field(default="local", alias="INDICATOR_PROVIDER")  # local | taapi | tvta
     taapi_secret: str | None = Field(default=None, alias="TAAPI_SECRET")
     taapi_confirm_on_trade: bool = Field(default=True, alias="TAAPI_CONFIRM_ON_TRADE")
