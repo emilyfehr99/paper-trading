@@ -253,6 +253,21 @@ class V1RulesSignalEngine(BaseStrategy):
         df["ema_9"] = ta.ema(df["close"], length=9)
         df["ema_21"] = ta.ema(df["close"], length=21)
         df["rsi"] = ta.rsi(df["close"], length=14)
+        # Alligator (Bill Williams): smoothed MAs on median price (HL2), shifted forward.
+        # We use Wilder's RMA as a SMMA proxy; shifts approximate the classic "jaw/teeth/lips" offsets.
+        try:
+            hl2 = (df["high"].astype(float) + df["low"].astype(float)) / 2.0
+            jaw = ta.rma(hl2, length=13)
+            teeth = ta.rma(hl2, length=8)
+            lips = ta.rma(hl2, length=5)
+            if jaw is not None:
+                df["alligator_jaw"] = jaw.shift(8)
+            if teeth is not None:
+                df["alligator_teeth"] = teeth.shift(5)
+            if lips is not None:
+                df["alligator_lips"] = lips.shift(3)
+        except Exception:
+            pass
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
         if macd is not None:
             df = pd.concat([df, macd], axis=1)
@@ -429,6 +444,29 @@ class V1RulesSignalEngine(BaseStrategy):
             "ema": float(last["ema_20"]),
             "ema_9": (None if pd.isna(last.get("ema_9")) else float(last.get("ema_9"))),
             "ema_21": (None if pd.isna(last.get("ema_21")) else float(last.get("ema_21"))),
+            "alligator_jaw": (None if pd.isna(last.get("alligator_jaw")) else float(last.get("alligator_jaw"))),
+            "alligator_teeth": (None if pd.isna(last.get("alligator_teeth")) else float(last.get("alligator_teeth"))),
+            "alligator_lips": (None if pd.isna(last.get("alligator_lips")) else float(last.get("alligator_lips"))),
+            "alligator_trend_up": (
+                1.0
+                if (
+                    (not pd.isna(last.get("alligator_lips")))
+                    and (not pd.isna(last.get("alligator_teeth")))
+                    and (not pd.isna(last.get("alligator_jaw")))
+                    and float(last.get("alligator_lips")) > float(last.get("alligator_teeth")) > float(last.get("alligator_jaw"))
+                )
+                else 0.0
+            ),
+            "alligator_trend_down": (
+                1.0
+                if (
+                    (not pd.isna(last.get("alligator_lips")))
+                    and (not pd.isna(last.get("alligator_teeth")))
+                    and (not pd.isna(last.get("alligator_jaw")))
+                    and float(last.get("alligator_lips")) < float(last.get("alligator_teeth")) < float(last.get("alligator_jaw"))
+                )
+                else 0.0
+            ),
             "ema_9_21_bias": (
                 None
                 if (pd.isna(last.get("ema_9")) or pd.isna(last.get("ema_21")))
@@ -459,6 +497,9 @@ class V1RulesSignalEngine(BaseStrategy):
                 "rsi_14",
                 "macd",
                 "macd_signal",
+                "alligator_jaw",
+                "alligator_teeth",
+                "alligator_lips",
                 "vwap",
                 "volume_ratio",
                 "ema_20",

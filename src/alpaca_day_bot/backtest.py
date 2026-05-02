@@ -63,6 +63,8 @@ def run_backtest(
     market_context_filter: bool = False,
     spy_5m_rsi_min: float = 40.0,
     strategy_params: dict | None = None,
+    on_signal: callable | None = None,
+    on_trade: callable | None = None,
 ) -> BacktestResult:
     """
     Lightweight event-driven backtest:
@@ -190,6 +192,7 @@ def run_backtest(
                 entry_px = float(pos["entry_price"])
                 entry_px_eff = float(pos.get("entry_px_eff", entry_px))
                 entry_ts = pos["entry_ts"]
+                sim_signal_id = pos.get("sim_signal_id")
                 stop_dist = float(pos.get("stop_dist", 0.0))
                 risk_r = (qty * stop_dist) if stop_dist > 0 else None
 
@@ -222,6 +225,16 @@ def run_backtest(
                         exit_cost_usd=exit_cost_usd,
                     )
                 )
+                if callable(on_trade):
+                    try:
+                        on_trade(trades[-1], sim_signal_id)
+                    except TypeError:
+                        try:
+                            on_trade(trades[-1])
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
                 del positions[sym]
 
         # Entry decisions
@@ -257,6 +270,12 @@ def run_backtest(
             df15_hist = df15.loc[:ts].copy()
 
             sig = engine.decide(symbol=sym, df_1m=df_hist, df_15m=df15_hist)
+            sim_signal_id = None
+            if sig is not None and callable(on_signal):
+                try:
+                    sim_signal_id = on_signal(ts.to_pydatetime(), sym, sig)
+                except Exception:
+                    sim_signal_id = None
             if sig is None or sig.action != "BUY":
                 continue
 
@@ -309,6 +328,7 @@ def run_backtest(
                 "tp": tp,
                 "stop_dist": stop_dist,
                 "half_spread": hs,
+                "sim_signal_id": sim_signal_id,
             }
 
     ec = pd.Series(equity_curve, index=pd.to_datetime(equity_index, utc=True))

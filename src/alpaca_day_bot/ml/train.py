@@ -18,6 +18,7 @@ from sklearn.ensemble import RandomForestClassifier
 
 from alpaca_day_bot.ml.dataset import build_signal_label_dataset
 from alpaca_day_bot.ml.executed_dataset import build_executed_trade_dataset
+from alpaca_day_bot.ml.sim_dataset import build_sim_trade_dataset
 
 
 @dataclass(frozen=True)
@@ -58,35 +59,51 @@ def train_and_save(
     min_rows: int = 50,
     action: str = "BUY",  # BUY | SHORT
     min_class_count: int = 30,
+    dataset_source: str = "auto",  # auto | executed | signals | sim
 ) -> dict:
     act = (action or "").strip().upper() or "BUY"
     if act not in ("BUY", "SHORT"):
         act = "BUY"
 
-    # Prefer executed-trade dataset (real fills) when enough trades exist.
-    exec_ds = None
-    try:
-        want_dir = "long" if act == "BUY" else "short"
-        exec_ds = build_executed_trade_dataset(
-            db_path=db_path,
-            min_trades=max(10, int(min_rows)),
-            direction=want_dir,
-        )
-    except Exception:
-        exec_ds = None
+    src = (dataset_source or "auto").strip().lower()
+    if src not in ("auto", "executed", "signals", "sim"):
+        src = "auto"
 
     ds_kind = "signals"
-    if exec_ds is not None:
-        X = exec_ds.X
-        y = exec_ds.y
-        meta = exec_ds.meta
-        ds_kind = f"executed_trades:{'long' if act == 'BUY' else 'short'}"
-    else:
-        # Fall back to triple-barrier / forward-return labels from signals.
+    X = None
+    y = None
+    meta = None
+
+    if src == "sim":
+        ds = build_sim_trade_dataset(db_path=db_path, actions=(act,))
+        X, y, meta = ds.X, ds.y, ds.meta
+        ds_kind = "sim_trades"
+    elif src == "signals":
         ds = build_signal_label_dataset(db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=(act,))
-        X = ds.X
-        y = ds.y
-        meta = ds.meta
+        X, y, meta = ds.X, ds.y, ds.meta
+        ds_kind = "signals"
+    else:
+        # Prefer executed-trade dataset (real fills) when enough trades exist.
+        exec_ds = None
+        if src in ("auto", "executed"):
+            try:
+                want_dir = "long" if act == "BUY" else "short"
+                exec_ds = build_executed_trade_dataset(
+                    db_path=db_path,
+                    min_trades=max(10, int(min_rows)),
+                    direction=want_dir,
+                )
+            except Exception:
+                exec_ds = None
+
+        if exec_ds is not None:
+            X, y, meta = exec_ds.X, exec_ds.y, exec_ds.meta
+            ds_kind = f"executed_trades:{'long' if act == 'BUY' else 'short'}"
+        else:
+            # Fall back to triple-barrier / forward-return labels from signals.
+            ds = build_signal_label_dataset(db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=(act,))
+            X, y, meta = ds.X, ds.y, ds.meta
+            ds_kind = "signals"
 
     if len(X) < int(min_rows):
         # In early deployment we may have 0–few labeled rows. Treat this as a
@@ -417,6 +434,12 @@ def main() -> None:
     ap.add_argument("--db", required=True, help="Path to ledger.sqlite3")
     ap.add_argument("--out", required=True, help="Output model artifact path (joblib)")
     ap.add_argument("--action", default="BUY", help="Which side to train: BUY or SHORT")
+    ap.add_argument(
+        "--dataset",
+        default="auto",
+        choices=["auto", "executed", "signals", "sim"],
+        help="Dataset source: auto (prefer executed), executed, signals (triple-barrier), or sim (sim_rollup).",
+    )
     ap.add_argument("--min-horizon-minutes", type=float, default=15.0)
     ap.add_argument("--min-rows", type=int, default=200, help="Minimum labeled rows required to train")
     ap.add_argument(
@@ -434,6 +457,7 @@ def main() -> None:
         min_rows=int(args.min_rows),
         action=str(args.action),
         min_class_count=int(args.min_class_count),
+        dataset_source=str(args.dataset),
     )
     print(json.dumps(meta, indent=2))
 

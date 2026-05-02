@@ -1,0 +1,106 @@
+# Build a long-lived simulated dataset (1y) + train sim models.
+name: Mock backtest (1y) + train sim models
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: "Which markets to simulate"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - equity
+          - crypto
+      equity_max_symbols:
+        description: "Equity universe size (liquid by dollar volume)"
+        required: true
+        default: "500"
+      start:
+        description: "Optional start YYYY-MM-DD (UTC)"
+        required: false
+      end:
+        description: "Optional end YYYY-MM-DD (UTC)"
+        required: false
+  schedule:
+    # Weekly refresh early Sunday UTC
+    - cron: "15 4 * * 0"
+
+concurrency:
+  group: alpaca-mock-backtest-year
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHON_VERSION: "3.12"
+  SIM_DB: "state/ledgers/sim_rollup.sqlite3"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
+
+      - name: Cache mock data + outputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            state/mock_cache
+            state/ledgers
+            state/models
+            reports
+          key: alpaca-mock-backtest-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            alpaca-mock-backtest-${{ runner.os }}-
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Build 1y sim dataset (equity + crypto)
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          MARKET="${{ github.event.inputs.market || 'both' }}"
+          EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
+          START="${{ github.event.inputs.start || '' }}"
+          END="${{ github.event.inputs.end || '' }}"
+
+          ARGS=(--market "$MARKET" --equity-max-symbols "$EQUITY_MAX" --sim-db "${SIM_DB}" --report-path "reports/mock_backtest_latest.md")
+          if [ -n "$START" ] && [ -n "$END" ]; then
+            ARGS+=(--start "$START" --end "$END")
+          fi
+          python3 tools/run_mock_backtest_year.py "${ARGS[@]}"
+
+      - name: Train sim models (BUY + SHORT)
+        run: |
+          set -euo pipefail
+          python3 tools/train_models_from_sim.py --db "${SIM_DB}"
+
+      - name: Upload sim dataset + models + reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mock-backtest-sim-${{ github.run_id }}
+          path: |
+            state/ledgers/sim_rollup.sqlite3
+            state/models/latest_buy_sim.joblib
+            state/models/latest_buy_sim.json
+            state/models/latest_short_sim.joblib
+            state/models/latest_short_sim.json
+            reports/mock_backtest_latest.md
+            reports/sim_training_latest.md
+          if-no-files-found: warn
+
