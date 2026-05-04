@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import numpy as np
 import pandas as pd
 
 
@@ -247,7 +248,36 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
                     X[c] = float("nan")
             X = X[cols]
         if task == "regression":
-            pred_raw = float(model.predict(X)[0])
+            if not hasattr(model, "predict"):
+                return ModelDecision(
+                    ok=False,
+                    provider=provider,
+                    proba=None,
+                    error="missing_predict",
+                    task="regression",
+                    regression_pred=None,
+                )
+            raw_pred = model.predict(X)
+            if raw_pred is None:
+                return ModelDecision(
+                    ok=False,
+                    provider=provider,
+                    proba=None,
+                    error="missing_regression_pred",
+                    task="regression",
+                    regression_pred=None,
+                )
+            flat = np.asarray(raw_pred, dtype=float).ravel()
+            if flat.size != 1:
+                return ModelDecision(
+                    ok=False,
+                    provider=provider,
+                    proba=None,
+                    error="invalid_regression_shape",
+                    task="regression",
+                    regression_pred=None,
+                )
+            pred_raw = float(flat[0])
             if not math.isfinite(pred_raw):
                 return ModelDecision(
                     ok=False,

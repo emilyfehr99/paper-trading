@@ -375,13 +375,16 @@ def train_and_save(
         except Exception:
             cut_ts = None
 
-    purge_minutes = 240.0
+    # Widen purge when labels use longer horizons (overlapping forward windows).
+    purge_minutes = max(240.0, float(min_horizon_minutes) * 8.0)
+    split_time_based_train_test = False
     if cut_ts is not None and ts is not None:
         gap = pd.Timedelta(minutes=float(purge_minutes))
         train_mask = ts < (cut_ts - gap)
         test_mask = ts > (cut_ts + gap)
         X_train, y_train = X.loc[train_mask], y.loc[train_mask]
         X_test, y_test = X.loc[test_mask], y.loc[test_mask]
+        split_time_based_train_test = True
     else:
         # Fallback: row-embargo (slightly wider vs row count when timestamps unavailable).
         embargo = min(80, max(8, int(n * 0.03)))
@@ -518,6 +521,10 @@ def train_and_save(
             "target_mode": tm,
             "min_edge_bps": float(min_edge_bps),
             "task": "regression",
+            "n_train": int(len(X_train)),
+            "n_test": int(len(X_test)),
+            "split_time_based_train_test": bool(split_time_based_train_test),
+            "train_test_purge_minutes": float(purge_minutes) if split_time_based_train_test else None,
             "metrics": {"rmse": rmse, "mae": mae_te, "n": int(len(y_test_f))},
             "extra_metrics": {
                 "gate_f1_positive_return_train_select": float(best_f1_gate),
@@ -611,7 +618,8 @@ def train_and_save(
             (
                 "clf",
                 LogisticRegression(
-                    max_iter=2000,
+                    max_iter=3000,
+                    tol=1e-4,
                     n_jobs=1,
                     class_weight="balanced",
                     C=0.25,
@@ -807,6 +815,7 @@ def train_and_save(
             "precision_at_10pct": _precision_at_k(yh, proba, 0.10),
             "precision_at_15pct": _precision_at_k(yh, proba, 0.15),
             "precision_at_20pct": _precision_at_k(yh, proba, 0.20),
+            "precision_at_25pct": _precision_at_k(yh, proba, 0.25),
             "precision_at_30pct": _precision_at_k(yh, proba, 0.30),
             **cal,
         }
@@ -883,6 +892,8 @@ def train_and_save(
             "hist_gbc_early_stopping": bool(hgb_params.get("early_stopping", False)),
             "hist_gbc_max_bins": int(hgb_params.get("max_bins", 255)),
             "logreg_standard_scaled": True,
+            "logreg_max_iter": 3000,
+            "logreg_tol": 1e-4,
             "model_selection_improvement_eps": 1e-4,
         }
 
@@ -1002,6 +1013,9 @@ def train_and_save(
         "n_train": int(len(X_train)),
         "n_test": int(len(X_test)),
         "train_pos_rate": float(np.mean(y_train)) if len(y_train) else float("nan"),
+        "test_pos_rate": float(np.mean(y_test)) if len(y_test) else float("nan"),
+        "split_time_based_train_test": bool(split_time_based_train_test),
+        "train_test_purge_minutes": float(purge_minutes) if split_time_based_train_test else None,
         "feature_columns": list(X_train.columns),
         "rows_seen": int(len(meta)),
         "explainability": feature_importance,
