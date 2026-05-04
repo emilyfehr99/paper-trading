@@ -138,6 +138,8 @@ def build_executed_trade_dataset(
         y_rows.append(1 if float(rt.pnl) > 0 else 0)
         meta_rows.append(
             {
+                # Align with signal/sim meta so train_and_save() time-purge uses entry time.
+                "ts": rt.entry_ts.isoformat(),
                 "symbol": rt.symbol,
                 "entry_ts": rt.entry_ts.isoformat(),
                 "exit_ts": rt.exit_ts.isoformat(),

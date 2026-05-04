@@ -12,7 +12,14 @@ from sklearn.dummy import DummyClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    brier_score_loss,
+    f1_score,
+    precision_score,
+    roc_auc_score,
+)
 from sklearn.pipeline import Pipeline
 from sklearn.ensemble import RandomForestClassifier
 
@@ -34,6 +41,15 @@ def _safe_auc(y_true, y_score) -> float | None:
         if len(set(y_true)) < 2:
             return None
         return float(roc_auc_score(y_true, y_score))
+    except Exception:
+        return None
+
+
+def _safe_average_precision(y_true, y_score) -> float | None:
+    try:
+        if len(set(y_true)) < 2:
+            return None
+        return float(average_precision_score(y_true, y_score))
     except Exception:
         return None
 
@@ -232,7 +248,14 @@ def train_and_save(
     logreg = Pipeline(
         steps=[
             ("impute", SimpleImputer(strategy="median")),
-            ("clf", LogisticRegression(max_iter=2000, n_jobs=1)),
+            (
+                "clf",
+                LogisticRegression(
+                    max_iter=2000,
+                    n_jobs=1,
+                    class_weight="balanced",
+                ),
+            ),
         ]
     )
 
@@ -248,6 +271,7 @@ def train_and_save(
                     min_samples_leaf=10,
                     random_state=42,
                     n_jobs=1,
+                    class_weight="balanced_subsample",
                 ),
             ),
         ]
@@ -292,6 +316,7 @@ def train_and_save(
             subsample=0.9,
             colsample_bytree=0.9,
             random_state=42,
+            class_weight="balanced",
         )
         lgbm_pipe = Pipeline(
             steps=[
@@ -338,7 +363,9 @@ def train_and_save(
             cal["calibration_bins"] = rows
         except Exception:
             cal = {}
+        ap = _safe_average_precision(y_test, proba)
         extra = {
+            "average_precision": ap,
             "precision_at_10pct": _precision_at_k(y_test, proba, 0.10),
             "precision_at_20pct": _precision_at_k(y_test, proba, 0.20),
             "precision_at_30pct": _precision_at_k(y_test, proba, 0.30),
@@ -348,31 +375,40 @@ def train_and_save(
 
     m_log, extra_log, proba_log = eval_model(base_model)
     best = ("logreg", base_model, m_log, extra_log, proba_log)
+
+    def model_score(m: TrainMetrics, extra: dict) -> float:
+        """Prefer ROC-AUC; if undefined (degenerate labels), use PR-AUC then accuracy."""
+        if m.auc is not None:
+            return float(m.auc)
+        ap = extra.get("average_precision") if isinstance(extra, dict) else None
+        if ap is not None:
+            return float(ap)
+        return float(m.acc)
+
     m_rf, extra_rf, proba_rf = eval_model(rf_model)
-    # prefer RF if it scores better (AUC when available, else accuracy)
-    def score(m: TrainMetrics) -> float:
-        return (m.auc if m.auc is not None else m.acc)
-    if score(m_rf) >= score(best[2]):
+    if model_score(m_rf, extra_rf) >= model_score(best[2], best[3]):
         best = ("rf", rf_model, m_rf, extra_rf, proba_rf)
     if lgbm_cal is not None:
         m_lgb, extra_lgb, proba_lgb = eval_model(lgbm_cal)
-        # choose by AUC when available, otherwise accuracy
-        if score(m_lgb) >= score(best[2]):
+        if model_score(m_lgb, extra_lgb) >= model_score(best[2], best[3]):
             best = ("lgbm", lgbm_cal, m_lgb, extra_lgb, proba_lgb)
 
     provider, model, metrics, extra_metrics, proba_best = best
     outp = Path(out_path)
     outp.parent.mkdir(parents=True, exist_ok=True)
 
-    # Simple threshold sweep for operational use (pick threshold maximizing accuracy on test).
+    # Threshold sweep for operational gating: prefer F1 (class imbalance), then precision.
     best_thr = 0.55
-    best_acc = -1.0
+    best_f1 = -1.0
+    best_thr_precision = 0.0
     try:
         for thr in (0.50, 0.55, 0.60, 0.65, 0.70):
             pred = (proba_best >= thr).astype(int)
-            acc_thr = float(accuracy_score(y_test, pred))
-            if acc_thr >= best_acc:
-                best_acc = acc_thr
+            f1_thr = float(f1_score(y_test, pred, zero_division=0))
+            prec_thr = float(precision_score(y_test, pred, zero_division=0))
+            if f1_thr > best_f1 or (f1_thr == best_f1 and prec_thr > best_thr_precision):
+                best_f1 = f1_thr
+                best_thr_precision = prec_thr
                 best_thr = float(thr)
     except Exception:
         pass
@@ -420,6 +456,8 @@ def train_and_save(
         "metrics": asdict(metrics),
         "extra_metrics": extra_metrics,
         "recommended_min_proba": best_thr,
+        "recommended_threshold_metric": "f1_then_precision",
+        "recommended_threshold_f1_test": best_f1,
         "feature_columns": list(X.columns),
         "rows_seen": int(len(meta)),
         "explainability": feature_importance,

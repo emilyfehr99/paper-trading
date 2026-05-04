@@ -122,6 +122,7 @@ def write_daily_report(
             j = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(j, dict) and not bool(j.get("skipped")):
                 m = j.get("metrics") if isinstance(j.get("metrics"), dict) else {}
+                ex = j.get("extra_metrics") if isinstance(j.get("extra_metrics"), dict) else {}
                 try:
                     pos_rate_s = "n/a" if m.get("pos_rate") is None else f"{float(m.get('pos_rate'))*100:.1f}%"
                 except Exception:
@@ -134,6 +135,10 @@ def write_daily_report(
                     acc_s = "n/a" if m.get("acc") is None else f"{float(m.get('acc'))*100:.1f}%"
                 except Exception:
                     acc_s = "n/a"
+                try:
+                    ap_s = "n/a" if ex.get("average_precision") is None else f"{float(ex.get('average_precision')):.3f}"
+                except Exception:
+                    ap_s = "n/a"
                 model_train_lines = [
                     "",
                     "### Model training (latest)",
@@ -144,8 +149,14 @@ def write_daily_report(
                     f"- **Test n**: {m.get('n', 'n/a')}",
                     f"- **Test pos rate**: {pos_rate_s}",
                     f"- **Test AUC**: {auc_s}",
+                    f"- **Test average precision (PR-AUC)**: {ap_s}",
                     f"- **Test accuracy**: {acc_s}",
-                    f"- **Recommended min proba**: {j.get('recommended_min_proba', 'n/a')}",
+                    f"- **Recommended min proba**: {j.get('recommended_min_proba', 'n/a')}"
+                    + (
+                        f" (picked by {j.get('recommended_threshold_metric')})"
+                        if j.get("recommended_threshold_metric")
+                        else ""
+                    ),
                 ]
             elif isinstance(j, dict) and bool(j.get("skipped")):
                 model_train_lines = [
