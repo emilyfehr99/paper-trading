@@ -239,6 +239,15 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
         provider = str(meta.get("provider")) if isinstance(meta, dict) else None
         task = str(meta.get("task") or "classification").strip().lower()
         cols = meta.get("feature_columns") if isinstance(meta, dict) else None
+        if isinstance(cols, list) and len(cols) == 0:
+            return ModelDecision(
+                ok=False,
+                provider=provider,
+                proba=None,
+                error="empty_feature_columns",
+                task=str(task),
+                regression_pred=None,
+            )
         x = _flatten_feature_dict(features)
         X = pd.DataFrame([x])
         if isinstance(cols, list) and cols:

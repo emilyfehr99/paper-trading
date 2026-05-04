@@ -412,6 +412,17 @@ def train_and_save(
         X_train, X_test = X.iloc[:cut], X.iloc[cut:]
         y_train, y_test = y.iloc[:cut], y.iloc[cut:]
 
+    dropped_duplicate_cols: list[str] = []
+    try:
+        if bool(X_train.columns.duplicated().any()):
+            dropped_duplicate_cols = [
+                str(x) for x in X_train.columns[X_train.columns.duplicated(keep=False)].unique()
+            ]
+            X_train = X_train.loc[:, ~X_train.columns.duplicated()].copy()
+            X_test = X_test.reindex(columns=X_train.columns, fill_value=np.nan).copy()
+    except Exception:
+        dropped_duplicate_cols = []
+
     X_train, X_test, dropped_var_cols = _drop_low_variance_numeric_columns(X_train, X_test)
 
     outp = Path(out_path)
@@ -431,6 +442,7 @@ def train_and_save(
             "action": act,
             "target_mode": tm,
             "dropped_constant_features": dropped_var_cols,
+            "dropped_duplicate_features": dropped_duplicate_cols,
         }
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -463,12 +475,12 @@ def train_and_save(
         pred_te = reg.predict(X_test)
         rmse = float(np.sqrt(mean_squared_error(y_test_f, pred_te))) if len(y_test_f) else float("nan")
         mae_te = float(mean_absolute_error(y_test_f, pred_te)) if len(y_test_f) else float("nan")
-        mae_tr = float(mean_absolute_error(y_train_f, pred_tr)) if len(y_train_f) else float("nan")
         try:
             r2_te = float(r2_score(y_test_f, pred_te)) if len(y_test_f) >= 2 else float("nan")
         except Exception:
             r2_te = float("nan")
         pred_tr = reg.predict(X_train)
+        mae_tr = float(mean_absolute_error(y_train_f, pred_tr)) if len(y_train_f) else float("nan")
         y_cls_tr = (y_train_f.values > 0.0).astype(int)
         y_cls_te = (y_test_f.values > 0.0).astype(int)
         best_thr = float(np.median(pred_tr)) if len(pred_tr) else 0.0
@@ -565,6 +577,7 @@ def train_and_save(
             "rows_seen": int(len(meta)),
             "explainability": fi,
             "dropped_constant_features": dropped_var_cols,
+            "dropped_duplicate_features": dropped_duplicate_cols,
         }
         joblib.dump({"model": reg, "meta": payload}, outp)
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -586,6 +599,7 @@ def train_and_save(
                     "action": act,
                     "target_mode": tm,
                     "dropped_constant_features": dropped_var_cols,
+                    "dropped_duplicate_features": dropped_duplicate_cols,
                 }
                 (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
                 return payload
@@ -627,6 +641,7 @@ def train_and_save(
             "rows_seen": int(len(meta)),
             "explainability": None,
             "dropped_constant_features": dropped_var_cols,
+            "dropped_duplicate_features": dropped_duplicate_cols,
         }
         joblib.dump({"model": model, "meta": payload}, outp)
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -688,6 +703,7 @@ def train_and_save(
                         subsample=0.9,
                         colsample_bytree=0.9,
                         colsample_bynode=0.78,
+                        verbose=-1,
                         random_state=42,
                         class_weight="balanced",
                         min_child_samples=44,
@@ -962,7 +978,24 @@ def train_and_save(
     best_thr_mcc_tr = -2.0
     n_tr_thr = int(len(y_train))
     min_pred_per_class = max(8, int(0.02 * n_tr_thr))
-    thr_grid = (0.40, 0.42, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
+    thr_grid = (
+        0.35,
+        0.38,
+        0.40,
+        0.42,
+        0.45,
+        0.50,
+        0.55,
+        0.60,
+        0.65,
+        0.70,
+        0.75,
+        0.80,
+        0.85,
+        0.90,
+        0.92,
+        0.95,
+    )
 
     def _threshold_sweep(require_min_support: bool) -> tuple[float, float, float, float, float]:
         b_thr, b_f1, b_prec, b_rec, b_mcc = 0.55, -1.0, 0.0, -1.0, -2.0
@@ -1003,9 +1036,15 @@ def train_and_save(
         f1_te_applied = float(f1_score(y_test, (proba_best >= float(best_thr)).astype(int), zero_division=0))
     except Exception:
         f1_te_applied = 0.0
+    brier_tr_fit = None
+    try:
+        brier_tr_fit = float(brier_score_loss(y_train, proba_tr))
+    except Exception:
+        brier_tr_fit = None
     if isinstance(extra_metrics, dict):
         extra_metrics = {
             **extra_metrics,
+            "brier_train_calibrated_scores": brier_tr_fit,
             "recommended_threshold_f1_train_select": float(best_f1_tr),
             "recommended_threshold_precision_train_select": float(best_thr_precision_tr),
             "recommended_threshold_recall_train_select": float(best_thr_recall_tr),
@@ -1077,6 +1116,7 @@ def train_and_save(
         "rows_seen": int(len(meta)),
         "explainability": feature_importance,
         "dropped_constant_features": dropped_var_cols,
+        "dropped_duplicate_features": dropped_duplicate_cols,
     }
     joblib.dump({"model": model, "meta": payload}, outp)
     (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
