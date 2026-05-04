@@ -265,7 +265,26 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
                 task="regression",
                 regression_pred=pred_raw,
             )
-        p_raw = float(model.predict_proba(X)[:, 1][0])
+        if not hasattr(model, "predict_proba"):
+            return ModelDecision(
+                ok=False,
+                provider=provider,
+                proba=None,
+                error="missing_predict_proba",
+                task="classification",
+                regression_pred=None,
+            )
+        pr = model.predict_proba(X)
+        if pr is None or not hasattr(pr, "shape") or len(pr.shape) != 2 or pr.shape[1] < 2:
+            return ModelDecision(
+                ok=False,
+                provider=provider,
+                proba=None,
+                error="invalid_proba_shape",
+                task="classification",
+                regression_pred=None,
+            )
+        p_raw = float(pr[0, 1])
         if not math.isfinite(p_raw):
             return ModelDecision(
                 ok=False,

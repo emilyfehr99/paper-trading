@@ -28,6 +28,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.base import clone
+from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.ensemble import (
     HistGradientBoostingClassifier,
@@ -169,10 +170,11 @@ def _fit_calibrated_pipeline(
             n_fit = 0
         # Fewer disjoint calibrators when n is modest — less variance than a large ensemble.
         cal_ensemble: bool | str = False if n_fit < 380 else "auto"
+        cv_obj = StratifiedKFold(n_splits=int(cv_n), shuffle=True, random_state=42)
         cal = CalibratedClassifierCV(
             p,
             method=str(cal_method),
-            cv=int(cv_n),
+            cv=cv_obj,
             ensemble=cal_ensemble,
             n_jobs=1,
         )
@@ -423,6 +425,7 @@ def train_and_save(
             "max_iter": 750,
             "learning_rate": 0.05,
             "l2_regularization": 1.0,
+            "max_bins": 192,
             "random_state": 42,
         }
         if int(len(X_train)) >= 120:
@@ -522,6 +525,7 @@ def train_and_save(
                 "gate_recall_positive_return_train_select": float(best_rec_gate),
                 "gate_f1_positive_return_test_applied": float(f1_test_at_thr),
                 "hist_gbr_early_stopping": bool(reg_kw.get("early_stopping", False)),
+                "hist_gbr_max_bins": int(reg_kw.get("max_bins", 255)),
                 "regression_imputer_median": True,
                 "regression_gate_min_support_applied": bool(reg_gate_used_min_sup),
                 "regression_gate_min_pred_per_class": int(min_gate_sup),
@@ -875,6 +879,7 @@ def train_and_save(
             "model_selection_score_blend": "with_mcc:0.46*auc+0.27*ap-0.12*brier+0.07*mcc_norm+0.08*balacc;else_legacy",
             "inner_val_time_ordered": bool(inner_val_time_ordered),
             "calibration_ensemble": "false_lt_380_rows_else_auto",
+            "calibration_cv": "stratified_kfold_shuffle_true_rs42",
             "hist_gbc_early_stopping": bool(hgb_params.get("early_stopping", False)),
             "hist_gbc_max_bins": int(hgb_params.get("max_bins", 255)),
             "logreg_standard_scaled": True,
@@ -887,12 +892,13 @@ def train_and_save(
     best_f1_tr = -1.0
     best_thr_precision_tr = 0.0
     best_thr_recall_tr = -1.0
+    best_thr_mcc_tr = -2.0
     n_tr_thr = int(len(y_train))
     min_pred_per_class = max(8, int(0.02 * n_tr_thr))
     thr_grid = (0.40, 0.42, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
 
-    def _threshold_sweep(require_min_support: bool) -> tuple[float, float, float, float]:
-        b_thr, b_f1, b_prec, b_rec = 0.55, -1.0, 0.0, -1.0
+    def _threshold_sweep(require_min_support: bool) -> tuple[float, float, float, float, float]:
+        b_thr, b_f1, b_prec, b_rec, b_mcc = 0.55, -1.0, 0.0, -1.0, -2.0
         for thr in thr_grid:
             pred = (proba_tr >= thr).astype(int)
             if require_min_support:
@@ -903,19 +909,26 @@ def train_and_save(
             f1_thr = float(f1_score(y_train, pred, zero_division=0))
             prec_thr = float(precision_score(y_train, pred, zero_division=0))
             rec_thr = float(recall_score(y_train, pred, zero_division=0))
+            mcc_thr = float(matthews_corrcoef(y_train, pred))
             better = f1_thr > b_f1
             better |= f1_thr == b_f1 and prec_thr > b_prec
             better |= f1_thr == b_f1 and prec_thr == b_prec and rec_thr > b_rec
+            better |= (
+                f1_thr == b_f1
+                and prec_thr == b_prec
+                and rec_thr == b_rec
+                and mcc_thr > b_mcc
+            )
             if better:
-                b_f1, b_prec, b_rec, b_thr = f1_thr, prec_thr, rec_thr, float(thr)
-        return b_thr, b_f1, b_prec, b_rec
+                b_f1, b_prec, b_rec, b_thr, b_mcc = f1_thr, prec_thr, rec_thr, float(thr), mcc_thr
+        return b_thr, b_f1, b_prec, b_rec, b_mcc
 
     thr_used_min_sup = True
     try:
-        best_thr, best_f1_tr, best_thr_precision_tr, best_thr_recall_tr = _threshold_sweep(True)
+        best_thr, best_f1_tr, best_thr_precision_tr, best_thr_recall_tr, best_thr_mcc_tr = _threshold_sweep(True)
         if best_f1_tr < 0.0:
             thr_used_min_sup = False
-            best_thr, best_f1_tr, best_thr_precision_tr, best_thr_recall_tr = _threshold_sweep(False)
+            best_thr, best_f1_tr, best_thr_precision_tr, best_thr_recall_tr, best_thr_mcc_tr = _threshold_sweep(False)
     except Exception:
         thr_used_min_sup = False
         pass
@@ -929,6 +942,7 @@ def train_and_save(
             "recommended_threshold_f1_train_select": float(best_f1_tr),
             "recommended_threshold_precision_train_select": float(best_thr_precision_tr),
             "recommended_threshold_recall_train_select": float(best_thr_recall_tr),
+            "recommended_threshold_mcc_train_select": float(best_thr_mcc_tr),
             "recommended_threshold_f1_test_applied": float(f1_te_applied),
             "threshold_min_pred_per_class": int(min_pred_per_class),
             "threshold_min_support_constraint_applied": bool(thr_used_min_sup),
@@ -983,8 +997,11 @@ def train_and_save(
         "metrics": asdict(metrics),
         "extra_metrics": extra_metrics,
         "recommended_min_proba": best_thr,
-        "recommended_threshold_metric": "f1_then_precision_on_train",
+        "recommended_threshold_metric": "f1_then_precision_recall_mcc_on_train",
         "recommended_threshold_f1_test": float(f1_te_applied),
+        "n_train": int(len(X_train)),
+        "n_test": int(len(X_test)),
+        "train_pos_rate": float(np.mean(y_train)) if len(y_train) else float("nan"),
         "feature_columns": list(X_train.columns),
         "rows_seen": int(len(meta)),
         "explainability": feature_importance,
