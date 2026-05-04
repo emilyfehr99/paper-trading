@@ -21,6 +21,7 @@ from sklearn.metrics import (
     brier_score_loss,
     f1_score,
     matthews_corrcoef,
+    mean_absolute_error,
     mean_squared_error,
     precision_score,
     recall_score,
@@ -134,6 +135,14 @@ def _cv_from_y_series(y: pd.Series) -> int:
         return 0
     min_class = min(counts.values()) if counts else 0
     return min(3, int(min_class)) if min_class else 0
+
+
+def _model_sel_score_improves(new_score: float, best_score: float, *, eps: float = 1e-4) -> bool:
+    """Prefer a clear margin when picking a model family to reduce arbitrary tie flips."""
+    try:
+        return float(new_score) > float(best_score) + float(eps)
+    except Exception:
+        return False
 
 
 def _clip_proba_1d(p: np.ndarray) -> np.ndarray:
@@ -432,6 +441,7 @@ def train_and_save(
         reg.fit(X_train, y_train_f)
         pred_te = reg.predict(X_test)
         rmse = float(np.sqrt(mean_squared_error(y_test_f, pred_te))) if len(y_test_f) else float("nan")
+        mae_te = float(mean_absolute_error(y_test_f, pred_te)) if len(y_test_f) else float("nan")
         pred_tr = reg.predict(X_train)
         y_cls_tr = (y_train_f.values > 0.0).astype(int)
         y_cls_te = (y_test_f.values > 0.0).astype(int)
@@ -505,7 +515,7 @@ def train_and_save(
             "target_mode": tm,
             "min_edge_bps": float(min_edge_bps),
             "task": "regression",
-            "metrics": {"rmse": rmse, "n": int(len(y_test_f))},
+            "metrics": {"rmse": rmse, "mae": mae_te, "n": int(len(y_test_f))},
             "extra_metrics": {
                 "gate_f1_positive_return_train_select": float(best_f1_gate),
                 "gate_precision_positive_return_train_select": float(best_prec_gate),
@@ -664,6 +674,7 @@ def train_and_save(
         "learning_rate": 0.06,
         "l2_regularization": 1.0,
         "min_samples_leaf": 20,
+        "max_bins": 192,
         "random_state": 42,
     }
     # Early stopping needs enough rows for internal val split + folds inside calibration CV.
@@ -832,15 +843,15 @@ def train_and_save(
         return float(m.acc)
 
     m_rf, extra_rf, proba_rf = eval_model(rf_model, Xev, yev)
-    if model_score(m_rf, extra_rf) >= model_score(best[2], best[3]):
+    if _model_sel_score_improves(model_score(m_rf, extra_rf), model_score(best[2], best[3])):
         best = ("rf", rf_model, m_rf, extra_rf, proba_rf)
     if lgbm_model_f is not None:
         m_lgb, extra_lgb, proba_lgb = eval_model(lgbm_model_f, Xev, yev)
-        if model_score(m_lgb, extra_lgb) >= model_score(best[2], best[3]):
+        if _model_sel_score_improves(model_score(m_lgb, extra_lgb), model_score(best[2], best[3])):
             best = ("lgbm", lgbm_model_f, m_lgb, extra_lgb, proba_lgb)
 
     m_hgb, extra_hgb, proba_hgb = eval_model(hgb_model, Xev, yev)
-    if model_score(m_hgb, extra_hgb) >= model_score(best[2], best[3]):
+    if _model_sel_score_improves(model_score(m_hgb, extra_hgb), model_score(best[2], best[3])):
         best = ("hist_gbc", hgb_model, m_hgb, extra_hgb, proba_hgb)
 
     if use_inner:
@@ -865,7 +876,9 @@ def train_and_save(
             "inner_val_time_ordered": bool(inner_val_time_ordered),
             "calibration_ensemble": "false_lt_380_rows_else_auto",
             "hist_gbc_early_stopping": bool(hgb_params.get("early_stopping", False)),
+            "hist_gbc_max_bins": int(hgb_params.get("max_bins", 255)),
             "logreg_standard_scaled": True,
+            "model_selection_improvement_eps": 1e-4,
         }
 
     # Threshold sweep on TRAIN scores only (avoids optimistic threshold fit on the same test used for AUC).
@@ -876,7 +889,7 @@ def train_and_save(
     best_thr_recall_tr = -1.0
     n_tr_thr = int(len(y_train))
     min_pred_per_class = max(8, int(0.02 * n_tr_thr))
-    thr_grid = (0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80)
+    thr_grid = (0.40, 0.42, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
 
     def _threshold_sweep(require_min_support: bool) -> tuple[float, float, float, float]:
         b_thr, b_f1, b_prec, b_rec = 0.55, -1.0, 0.0, -1.0

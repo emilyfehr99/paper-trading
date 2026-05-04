@@ -215,7 +215,25 @@ def load_model(path: str) -> dict[str, Any] | None:
 
 def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> ModelDecision:
     try:
+        if not isinstance(model_bundle, dict):
+            return ModelDecision(
+                ok=False,
+                provider=None,
+                proba=None,
+                error="invalid_model_bundle",
+                task="classification",
+                regression_pred=None,
+            )
         model = model_bundle.get("model")
+        if model is None:
+            return ModelDecision(
+                ok=False,
+                provider=None,
+                proba=None,
+                error="missing_model",
+                task="classification",
+                regression_pred=None,
+            )
         meta = model_bundle.get("meta") or {}
         provider = str(meta.get("provider")) if isinstance(meta, dict) else None
         task = str(meta.get("task") or "classification").strip().lower()
