@@ -40,7 +40,7 @@ def _split_reg_act(key: str) -> tuple[str, str]:
 def learn_regime_min_proba_map(
     *,
     db_path: str,
-    min_rows_per_bucket: int = 25,
+    min_rows_per_bucket: int = 40,
     min_rows_per_regime: int | None = None,
     default_min_proba: float = 0.55,
 ) -> tuple[dict[str, float], list[RegimeThresholdRow]]:

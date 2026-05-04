@@ -69,6 +69,19 @@ def _precision_at_k(y_true, y_score, k_frac: float) -> float | None:
         return None
 
 
+def _training_quality_mask(X: pd.DataFrame) -> pd.Series:
+    """
+    Drop rows where too many core technicals are missing (reduces noisy / incomplete labels).
+    """
+    candidates = ("close", "rsi_14", "macd", "macd_signal", "atr", "volume_ratio")
+    present = [c for c in candidates if c in X.columns]
+    if len(present) < 2:
+        return pd.Series(True, index=X.index)
+    sub = X[present].apply(pd.to_numeric, errors="coerce")
+    need = min(3, len(present))
+    return sub.notna().sum(axis=1) >= int(need)
+
+
 def train_and_save(
     *,
     db_path: str,
@@ -149,9 +162,17 @@ def train_and_save(
             X, y, meta = ds.X, ds.y, ds.meta
             ds_kind = "signals"
 
+    # Drop label rows with sparse core features (improves signal-to-noise vs training on NaN-heavy rows).
+    try:
+        qm = _training_quality_mask(X)
+        if int(qm.sum()) >= int(min_rows):
+            X = X.loc[qm].copy()
+            y = y.loc[qm].copy()
+            meta = meta.loc[qm].copy()
+    except Exception:
+        pass
+
     if len(X) < int(min_rows):
-        # In early deployment we may have 0–few labeled rows. Treat this as a
-        # successful no-op so scheduled training doesn't fail the workflow.
         outp = Path(out_path)
         outp.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -164,6 +185,7 @@ def train_and_save(
             "min_required": int(min_rows),
             "dataset_kind": ds_kind,
             "action": act,
+            "target_mode": tm,
         }
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -233,10 +255,10 @@ def train_and_save(
             (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
             return payload
 
-    # Chronological split (reduce leakage): last 25% as test, with a small embargo to reduce overlap.
+    # Chronological split (reduce leakage): last 25% as test, with embargo to reduce overlapping labels.
     n = len(X)
     cut = max(10, int(n * 0.75))
-    # Time-series purging: enforce a 60-minute "dead zone" around the split timestamp.
+    # Wider dead zone reduces leakage when labels span multiple bars (e.g. 15m TB horizons).
     try:
         ts = pd.to_datetime(meta["ts"], utc=True, errors="coerce")
     except Exception:
@@ -251,7 +273,7 @@ def train_and_save(
         except Exception:
             cut_ts = None
 
-    purge_minutes = 60.0
+    purge_minutes = 240.0
     if cut_ts is not None and ts is not None:
         gap = pd.Timedelta(minutes=float(purge_minutes))
         train_mask = ts < (cut_ts - gap)
@@ -259,8 +281,8 @@ def train_and_save(
         X_train, y_train = X.loc[train_mask], y.loc[train_mask]
         X_test, y_test = X.loc[test_mask], y.loc[test_mask]
     else:
-        # Fallback: row-embargo.
-        embargo = min(50, max(5, int(n * 0.02)))
+        # Fallback: row-embargo (slightly wider vs row count when timestamps unavailable).
+        embargo = min(80, max(8, int(n * 0.03)))
         cut2 = min(n, cut + embargo)
         X_train, y_train = X.iloc[:cut], y.iloc[:cut]
         X_test, y_test = X.iloc[cut2:], y.iloc[cut2:]
@@ -286,26 +308,31 @@ def train_and_save(
         reg.fit(X_train, y_train_f)
         pred_te = reg.predict(X_test)
         rmse = float(np.sqrt(mean_squared_error(y_test_f, pred_te))) if len(y_test_f) else float("nan")
-        y_cls = (y_test_f.values > 0.0).astype(int)
-        best_thr = float(np.median(pred_te)) if len(pred_te) else 0.0
+        pred_tr = reg.predict(X_train)
+        y_cls_tr = (y_train_f.values > 0.0).astype(int)
+        y_cls_te = (y_test_f.values > 0.0).astype(int)
+        best_thr = float(np.median(pred_tr)) if len(pred_tr) else 0.0
         best_f1_gate = -1.0
         best_prec_gate = 0.0
         try:
-            qu = np.unique(np.quantile(pred_te, np.linspace(0.05, 0.95, 29)))
+            qu = np.unique(np.quantile(pred_tr, np.linspace(0.05, 0.95, 29)))
             for thr in qu:
                 if not np.isfinite(thr):
                     continue
-                pred_bin = (pred_te >= float(thr)).astype(int)
+                pred_bin = (pred_tr >= float(thr)).astype(int)
                 if int(np.sum(pred_bin)) < 5:
                     continue
-                f1g = float(f1_score(y_cls, pred_bin, zero_division=0))
-                pre_g = float(precision_score(y_cls, pred_bin, zero_division=0))
+                f1g = float(f1_score(y_cls_tr, pred_bin, zero_division=0))
+                pre_g = float(precision_score(y_cls_tr, pred_bin, zero_division=0))
                 if f1g > best_f1_gate or (f1g == best_f1_gate and pre_g > best_prec_gate):
                     best_f1_gate = f1g
                     best_prec_gate = pre_g
                     best_thr = float(thr)
         except Exception:
             pass
+        f1_test_at_thr = float(
+            f1_score(y_cls_te, (pred_te >= float(best_thr)).astype(int), zero_division=0)
+        )
 
         fi = None
         try:
@@ -329,8 +356,9 @@ def train_and_save(
             "task": "regression",
             "metrics": {"rmse": rmse, "n": int(len(y_test_f))},
             "extra_metrics": {
-                "gate_f1_positive_return": float(best_f1_gate),
-                "gate_precision_positive_return": float(best_prec_gate),
+                "gate_f1_positive_return_train_select": float(best_f1_gate),
+                "gate_precision_positive_return_train_select": float(best_prec_gate),
+                "gate_f1_positive_return_test_applied": float(f1_test_at_thr),
             },
             "recommended_regression_min": float(best_thr),
             "recommended_min_proba": None,
@@ -405,7 +433,7 @@ def train_and_save(
                 RandomForestClassifier(
                     n_estimators=400,
                     max_depth=8,
-                    min_samples_leaf=10,
+                    min_samples_leaf=20,
                     random_state=42,
                     n_jobs=1,
                     class_weight="balanced_subsample",
@@ -533,21 +561,32 @@ def train_and_save(
     provider, model, metrics, extra_metrics, proba_best = best
     outp.parent.mkdir(parents=True, exist_ok=True)
 
-    # Threshold sweep for operational gating: prefer F1 (class imbalance), then precision.
+    # Threshold sweep on TRAIN scores only (avoids optimistic threshold fit on the same test used for AUC).
+    proba_tr = model.predict_proba(X_train)[:, 1]
     best_thr = 0.55
-    best_f1 = -1.0
-    best_thr_precision = 0.0
+    best_f1_tr = -1.0
+    best_thr_precision_tr = 0.0
     try:
         for thr in (0.50, 0.55, 0.60, 0.65, 0.70):
-            pred = (proba_best >= thr).astype(int)
-            f1_thr = float(f1_score(y_test, pred, zero_division=0))
-            prec_thr = float(precision_score(y_test, pred, zero_division=0))
-            if f1_thr > best_f1 or (f1_thr == best_f1 and prec_thr > best_thr_precision):
-                best_f1 = f1_thr
-                best_thr_precision = prec_thr
+            pred = (proba_tr >= thr).astype(int)
+            f1_thr = float(f1_score(y_train, pred, zero_division=0))
+            prec_thr = float(precision_score(y_train, pred, zero_division=0))
+            if f1_thr > best_f1_tr or (f1_thr == best_f1_tr and prec_thr > best_thr_precision_tr):
+                best_f1_tr = f1_thr
+                best_thr_precision_tr = prec_thr
                 best_thr = float(thr)
     except Exception:
         pass
+    try:
+        f1_te_applied = float(f1_score(y_test, (proba_best >= float(best_thr)).astype(int), zero_division=0))
+    except Exception:
+        f1_te_applied = 0.0
+    if isinstance(extra_metrics, dict):
+        extra_metrics = {
+            **extra_metrics,
+            "recommended_threshold_f1_train_select": float(best_f1_tr),
+            "recommended_threshold_f1_test_applied": float(f1_te_applied),
+        }
 
     # Save simple explainability artifacts
     feature_importance = None
@@ -595,8 +634,8 @@ def train_and_save(
         "metrics": asdict(metrics),
         "extra_metrics": extra_metrics,
         "recommended_min_proba": best_thr,
-        "recommended_threshold_metric": "f1_then_precision",
-        "recommended_threshold_f1_test": best_f1,
+        "recommended_threshold_metric": "f1_then_precision_on_train",
+        "recommended_threshold_f1_test": float(f1_te_applied),
         "feature_columns": list(X.columns),
         "rows_seen": int(len(meta)),
         "explainability": feature_importance,
