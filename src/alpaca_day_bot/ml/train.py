@@ -139,6 +139,19 @@ def _cv_from_y_series(y: pd.Series) -> int:
     return min(3, int(min_class)) if min_class else 0
 
 
+def _ece_penalty_from_extra(extra: dict | None) -> float:
+    """Expected calibration error (weighted L1 bin gap); penalize miscalibration in model selection."""
+    if not isinstance(extra, dict):
+        return 0.0
+    e = extra.get("ece_approx")
+    try:
+        if e is not None and np.isfinite(float(e)):
+            return 0.04 * float(e)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _model_sel_score_improves(new_score: float, best_score: float, *, eps: float = 1e-4) -> bool:
     """Prefer a clear margin when picking a model family to reduce arbitrary tie flips."""
     try:
@@ -450,6 +463,7 @@ def train_and_save(
         pred_te = reg.predict(X_test)
         rmse = float(np.sqrt(mean_squared_error(y_test_f, pred_te))) if len(y_test_f) else float("nan")
         mae_te = float(mean_absolute_error(y_test_f, pred_te)) if len(y_test_f) else float("nan")
+        mae_tr = float(mean_absolute_error(y_train_f, pred_tr)) if len(y_train_f) else float("nan")
         try:
             r2_te = float(r2_score(y_test_f, pred_te)) if len(y_test_f) >= 2 else float("nan")
         except Exception:
@@ -543,6 +557,7 @@ def train_and_save(
                 "regression_imputer_median": True,
                 "regression_gate_min_support_applied": bool(reg_gate_used_min_sup),
                 "regression_gate_min_pred_per_class": int(min_gate_sup),
+                "mae_train_fit": float(mae_tr),
             },
             "recommended_regression_min": float(best_thr),
             "recommended_min_proba": None,
@@ -694,6 +709,7 @@ def train_and_save(
         "l2_regularization": 1.0,
         "min_samples_leaf": 20,
         "max_bins": 192,
+        "max_leaf_nodes": 64,
         "random_state": 42,
     }
     # Early stopping needs enough rows for internal val split + folds inside calibration CV.
@@ -816,6 +832,21 @@ def train_and_save(
                     }
                 )
             cal["calibration_bins"] = rows
+            ece_apx = None
+            try:
+                if rows:
+                    ntot = int(sum(int(r["n"]) for r in rows))
+                    if ntot > 0:
+                        ece_apx = float(
+                            sum(
+                                int(r["n"]) * abs(float(r["p_mean"]) - float(r["hit_rate"]))
+                                for r in rows
+                            )
+                            / float(ntot)
+                        )
+            except Exception:
+                ece_apx = None
+            cal["ece_approx"] = ece_apx
         except Exception:
             cal = {}
         ap = _safe_average_precision(yh, proba)
@@ -833,6 +864,7 @@ def train_and_save(
             "average_precision": ap,
             "balanced_accuracy_at_0p5": bac,
             "matthews_corrcoef_at_0p5": mcc,
+            "precision_at_5pct": _precision_at_k(yh, proba, 0.05),
             "precision_at_10pct": _precision_at_k(yh, proba, 0.10),
             "precision_at_15pct": _precision_at_k(yh, proba, 0.15),
             "precision_at_20pct": _precision_at_k(yh, proba, 0.20),
@@ -863,11 +895,11 @@ def train_and_save(
                 s = 0.46 * float(auc) + 0.27 * float(ap) - 0.12 * float(br) + 0.07 * float(mcc_norm)
                 if bac is not None and np.isfinite(float(bac)):
                     s += 0.08 * float(bac)
-                return s
+                return s - _ece_penalty_from_extra(extra)
             s = 0.49 * float(auc) + 0.30 * float(ap) - 0.13 * float(br)
             if bac is not None and np.isfinite(float(bac)):
                 s += 0.08 * float(bac)
-            return s
+            return s - _ece_penalty_from_extra(extra)
         if auc is not None and ap is not None:
             return 0.62 * float(auc) + 0.38 * float(ap)
         if auc is not None:
@@ -906,13 +938,15 @@ def train_and_save(
             **extra_metrics,
             "calibration_method": str(cal_method),
             "model_selection_inner_val": bool(use_inner),
-            "model_selection_score_blend": "with_mcc:0.46*auc+0.27*ap-0.12*brier+0.07*mcc_norm+0.08*balacc;else_legacy",
+            "model_selection_score_blend": "brier_blend_minus_0.04*ece_approx_when_finite;with_mcc_or_legacy",
             "inner_val_time_ordered": bool(inner_val_time_ordered),
             "inner_val_boundary_gap_rows": int(inner_val_boundary_gap_rows),
             "calibration_ensemble": "false_lt_380_rows_else_auto",
             "calibration_cv": "stratified_kfold_shuffle_true_rs42",
             "hist_gbc_early_stopping": bool(hgb_params.get("early_stopping", False)),
             "hist_gbc_max_bins": int(hgb_params.get("max_bins", 255)),
+            "hist_gbc_max_leaf_nodes": int(hgb_params.get("max_leaf_nodes", 0) or 0),
+            "model_selection_ece_penalty": "subtract_0.04_times_ece_approx_when_finite",
             "logreg_standard_scaled": True,
             "logreg_max_iter": 3000,
             "logreg_tol": 1e-4,

@@ -247,6 +247,15 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
                 if c not in X.columns:
                     X[c] = float("nan")
             X = X[cols]
+            if int(X.shape[1]) != int(len(cols)):
+                return ModelDecision(
+                    ok=False,
+                    provider=provider,
+                    proba=None,
+                    error="feature_column_count_mismatch",
+                    task=str(task),
+                    regression_pred=None,
+                )
         if task == "regression":
             if not hasattr(model, "predict"):
                 return ModelDecision(
