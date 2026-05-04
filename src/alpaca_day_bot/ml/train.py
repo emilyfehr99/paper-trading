@@ -20,6 +20,7 @@ from sklearn.metrics import (
     balanced_accuracy_score,
     brier_score_loss,
     f1_score,
+    matthews_corrcoef,
     mean_squared_error,
     precision_score,
     recall_score,
@@ -422,7 +423,12 @@ def train_and_save(
                 "validation_fraction": 0.12,
                 "n_iter_no_change": 35,
             }
-        reg = HistGradientBoostingRegressor(**reg_kw)
+        reg = Pipeline(
+            steps=[
+                ("impute", SimpleImputer(strategy="median")),
+                ("clf", HistGradientBoostingRegressor(**reg_kw)),
+            ]
+        )
         reg.fit(X_train, y_train_f)
         pred_te = reg.predict(X_test)
         rmse = float(np.sqrt(mean_squared_error(y_test_f, pred_te))) if len(y_test_f) else float("nan")
@@ -432,33 +438,57 @@ def train_and_save(
         best_thr = float(np.median(pred_tr)) if len(pred_tr) else 0.0
         best_f1_gate = -1.0
         best_prec_gate = 0.0
-        try:
-            qu = np.unique(np.quantile(pred_tr, np.linspace(0.05, 0.95, 29)))
+        best_rec_gate = -1.0
+        n_reg_tr = int(len(y_cls_tr))
+        min_gate_sup = max(8, int(0.02 * n_reg_tr)) if n_reg_tr else 8
+
+        def _reg_gate_sweep(require_min_support: bool) -> tuple[float, float, float, float]:
+            b_thr, b_f1, b_prec, b_rec = best_thr, -1.0, 0.0, -1.0
+            try:
+                qu = np.unique(np.quantile(pred_tr, np.linspace(0.05, 0.95, 29)))
+            except Exception:
+                return b_thr, b_f1, b_prec, b_rec
             for thr in qu:
                 if not np.isfinite(thr):
                     continue
                 pred_bin = (pred_tr >= float(thr)).astype(int)
-                if int(np.sum(pred_bin)) < 5:
+                if require_min_support:
+                    np_pos = int(np.sum(pred_bin))
+                    np_neg = int(n_reg_tr - np_pos)
+                    if np_pos < min_gate_sup or np_neg < min_gate_sup:
+                        continue
+                elif int(np.sum(pred_bin)) < 5:
                     continue
                 f1g = float(f1_score(y_cls_tr, pred_bin, zero_division=0))
                 pre_g = float(precision_score(y_cls_tr, pred_bin, zero_division=0))
-                if f1g > best_f1_gate or (f1g == best_f1_gate and pre_g > best_prec_gate):
-                    best_f1_gate = f1g
-                    best_prec_gate = pre_g
-                    best_thr = float(thr)
+                rec_g = float(recall_score(y_cls_tr, pred_bin, zero_division=0))
+                better = f1g > b_f1
+                better |= f1g == b_f1 and pre_g > b_prec
+                better |= f1g == b_f1 and pre_g == b_prec and rec_g > b_rec
+                if better:
+                    b_f1, b_prec, b_rec, b_thr = f1g, pre_g, rec_g, float(thr)
+            return b_thr, b_f1, b_prec, b_rec
+
+        reg_gate_used_min_sup = True
+        try:
+            best_thr, best_f1_gate, best_prec_gate, best_rec_gate = _reg_gate_sweep(True)
+            if best_f1_gate < 0.0:
+                reg_gate_used_min_sup = False
+                best_thr, best_f1_gate, best_prec_gate, best_rec_gate = _reg_gate_sweep(False)
         except Exception:
-            pass
+            reg_gate_used_min_sup = False
         f1_test_at_thr = float(
             f1_score(y_cls_te, (pred_te >= float(best_thr)).astype(int), zero_division=0)
         )
 
         fi = None
         try:
-            if hasattr(reg, "feature_importances_"):
+            clf_r = reg.named_steps.get("clf") if hasattr(reg, "named_steps") else None
+            if clf_r is not None and hasattr(clf_r, "feature_importances_"):
                 fi = sorted(
                     [
                         {"feature": c, "importance": float(v)}
-                        for c, v in zip(list(X_train.columns), list(reg.feature_importances_))
+                        for c, v in zip(list(X_train.columns), list(clf_r.feature_importances_))
                     ],
                     key=lambda r: -r["importance"],
                 )[:30]
@@ -479,8 +509,12 @@ def train_and_save(
             "extra_metrics": {
                 "gate_f1_positive_return_train_select": float(best_f1_gate),
                 "gate_precision_positive_return_train_select": float(best_prec_gate),
+                "gate_recall_positive_return_train_select": float(best_rec_gate),
                 "gate_f1_positive_return_test_applied": float(f1_test_at_thr),
                 "hist_gbr_early_stopping": bool(reg_kw.get("early_stopping", False)),
+                "regression_imputer_median": True,
+                "regression_gate_min_support_applied": bool(reg_gate_used_min_sup),
+                "regression_gate_min_pred_per_class": int(min_gate_sup),
             },
             "recommended_regression_min": float(best_thr),
             "recommended_min_proba": None,
@@ -582,6 +616,7 @@ def train_and_save(
                 RandomForestClassifier(
                     n_estimators=400,
                     max_depth=8,
+                    min_samples_split=14,
                     min_samples_leaf=20,
                     max_samples=0.85,
                     ccp_alpha=1e-4,
@@ -661,20 +696,39 @@ def train_and_save(
     cut_sel = max(45, int(len(X_train) * 0.72))
     X_tr_src, y_tr_src = X_train, y_train
     X_va, y_va = None, None
+    inner_val_time_ordered = False
     if use_inner and (len(X_train) - cut_sel) >= 35:
-        X_tr_src = X_train.iloc[:cut_sel]
-        y_tr_src = y_train.iloc[:cut_sel]
-        X_va = X_train.iloc[cut_sel:]
-        y_va = y_train.iloc[cut_sel:]
+        placed = False
+        try:
+            ts_tr = pd.to_datetime(meta.reindex(X_train.index)["ts"], utc=True, errors="coerce")
+            if int(ts_tr.notna().sum()) >= max(80, int(0.88 * len(X_train))):
+                idx_sorted = ts_tr.sort_values().index
+                X_sorted = X_train.loc[idx_sorted]
+                y_sorted = y_train.loc[idx_sorted]
+                cut_t = max(45, int(len(X_sorted) * 0.72))
+                if len(X_sorted) - cut_t >= 35:
+                    X_tr_src, y_tr_src = X_sorted.iloc[:cut_t], y_sorted.iloc[:cut_t]
+                    X_va, y_va = X_sorted.iloc[cut_t:], y_sorted.iloc[cut_t:]
+                    inner_val_time_ordered = True
+                    placed = True
+        except Exception:
+            pass
+        if not placed:
+            X_tr_src = X_train.iloc[:cut_sel]
+            y_tr_src = y_train.iloc[:cut_sel]
+            X_va = X_train.iloc[cut_sel:]
+            y_va = y_train.iloc[cut_sel:]
         try:
             if len({int(v) for v in list(y_tr_src)}) < 2 or len({int(v) for v in list(y_va)}) < 2:
                 use_inner = False
                 X_tr_src, y_tr_src = X_train, y_train
                 X_va, y_va = None, None
+                inner_val_time_ordered = False
         except Exception:
             use_inner = False
             X_tr_src, y_tr_src = X_train, y_train
             X_va, y_va = None, None
+            inner_val_time_ordered = False
     else:
         use_inner = False
 
@@ -722,15 +776,19 @@ def train_and_save(
             cal = {}
         ap = _safe_average_precision(yh, proba)
         bac = None
+        mcc = None
         try:
             y_arr = np.asarray(yh, dtype=int)
             if len(np.unique(y_arr)) >= 2:
                 bac = float(balanced_accuracy_score(y_arr, pred))
+                mcc = float(matthews_corrcoef(y_arr, pred))
         except Exception:
             bac = None
+            mcc = None
         extra = {
             "average_precision": ap,
             "balanced_accuracy_at_0p5": bac,
+            "matthews_corrcoef_at_0p5": mcc,
             "precision_at_10pct": _precision_at_k(yh, proba, 0.10),
             "precision_at_15pct": _precision_at_k(yh, proba, 0.15),
             "precision_at_20pct": _precision_at_k(yh, proba, 0.20),
@@ -745,13 +803,22 @@ def train_and_save(
 
     def model_score(m: TrainMetrics, extra: dict) -> float:
         """
-        Blend ROC-AUC, PR-AUC, Brier, and balanced accuracy at 0.5; fall back when pieces missing.
+        Blend ROC-AUC, PR-AUC, Brier, balanced accuracy, and MCC at 0.5; fall back when pieces missing.
         """
         ap = extra.get("average_precision") if isinstance(extra, dict) else None
         br = extra.get("brier") if isinstance(extra, dict) else None
         bac = extra.get("balanced_accuracy_at_0p5") if isinstance(extra, dict) else None
+        mcc = extra.get("matthews_corrcoef_at_0p5") if isinstance(extra, dict) else None
         auc = m.auc
         if auc is not None and ap is not None and br is not None and np.isfinite(float(br)):
+            mcc_norm = None
+            if mcc is not None and np.isfinite(float(mcc)):
+                mcc_norm = (float(mcc) + 1.0) / 2.0
+            if mcc_norm is not None:
+                s = 0.46 * float(auc) + 0.27 * float(ap) - 0.12 * float(br) + 0.07 * float(mcc_norm)
+                if bac is not None and np.isfinite(float(bac)):
+                    s += 0.08 * float(bac)
+                return s
             s = 0.49 * float(auc) + 0.30 * float(ap) - 0.13 * float(br)
             if bac is not None and np.isfinite(float(bac)):
                 s += 0.08 * float(bac)
@@ -794,7 +861,8 @@ def train_and_save(
             **extra_metrics,
             "calibration_method": str(cal_method),
             "model_selection_inner_val": bool(use_inner),
-            "model_selection_score_blend": "0.49*auc+0.30*ap-0.13*brier+0.08*balacc_when_all_finite_else_legacy",
+            "model_selection_score_blend": "with_mcc:0.46*auc+0.27*ap-0.12*brier+0.07*mcc_norm+0.08*balacc;else_legacy",
+            "inner_val_time_ordered": bool(inner_val_time_ordered),
             "calibration_ensemble": "false_lt_380_rows_else_auto",
             "hist_gbc_early_stopping": bool(hgb_params.get("early_stopping", False)),
             "logreg_standard_scaled": True,
