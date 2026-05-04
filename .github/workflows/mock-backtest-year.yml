@@ -224,6 +224,12 @@ jobs:
           SHARDS: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.equity_shards != '') && github.event.inputs.equity_shards || env.EQUITY_SHARDS }}
         run: |
           set -euo pipefail
+          # If this shard index is out of range for this run, exit immediately.
+          if [ "${SHARD}" -ge "${SHARDS}" ]; then
+            echo "Skipping shard ${SHARD} (shards=${SHARDS})"
+            exit 0
+          fi
+
           START="${{ github.event.inputs.start || '' }}"
           END="${{ github.event.inputs.end || '' }}"
           EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
