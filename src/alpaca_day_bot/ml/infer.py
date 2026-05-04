@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -237,7 +238,18 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
                 task="regression",
                 regression_pred=pred,
             )
-        p = float(model.predict_proba(X)[:, 1][0])
+        p_raw = float(model.predict_proba(X)[:, 1][0])
+        if not math.isfinite(p_raw):
+            return ModelDecision(
+                ok=False,
+                provider=provider,
+                proba=None,
+                error="non_finite_proba",
+                task="classification",
+                regression_pred=None,
+            )
+        eps = 1e-6
+        p = min(1.0 - eps, max(eps, p_raw))
         return ModelDecision(ok=True, provider=provider, proba=p, error=None, task="classification", regression_pred=None)
     except Exception as e:
         return ModelDecision(

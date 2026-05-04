@@ -22,6 +22,7 @@ from sklearn.metrics import (
     precision_score,
     roc_auc_score,
 )
+from sklearn.base import clone
 from sklearn.pipeline import Pipeline
 from sklearn.ensemble import (
     HistGradientBoostingClassifier,
@@ -117,6 +118,35 @@ def _training_quality_mask(X: pd.DataFrame) -> pd.Series:
     sub = X[present].apply(pd.to_numeric, errors="coerce")
     need = min(3, len(present))
     return sub.notna().sum(axis=1) >= int(need)
+
+
+def _cv_from_y_series(y: pd.Series) -> int:
+    counts: dict[int, int] = {}
+    try:
+        for v in list(y):
+            iv = int(v)
+            counts[iv] = counts.get(iv, 0) + 1
+    except Exception:
+        return 0
+    min_class = min(counts.values()) if counts else 0
+    return min(3, int(min_class)) if min_class else 0
+
+
+def _fit_calibrated_pipeline(
+    pipe: Pipeline,
+    X,
+    y,
+    *,
+    cv_n: int,
+    cal_method: str,
+) -> Pipeline | CalibratedClassifierCV:
+    p = clone(pipe)
+    if cv_n >= 2:
+        cal = CalibratedClassifierCV(p, method=str(cal_method), cv=int(cv_n))
+        cal.fit(X, y)
+        return cal
+    p.fit(X, y)
+    return p
 
 
 def train_and_save(
@@ -493,7 +523,7 @@ def train_and_save(
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
-    # Baseline calibrated logistic regression
+    # ---- Unfitted classifier templates (clone + fit per stage) ----
     logreg = Pipeline(
         steps=[
             ("impute", SimpleImputer(strategy="median")),
@@ -511,7 +541,6 @@ def train_and_save(
         ]
     )
 
-    # Meta-labeling model (nonlinear): RandomForest on success/fail history
     rf = Pipeline(
         steps=[
             ("impute", SimpleImputer(strategy="median")),
@@ -521,6 +550,7 @@ def train_and_save(
                     n_estimators=400,
                     max_depth=8,
                     min_samples_leaf=20,
+                    max_samples=0.85,
                     random_state=42,
                     n_jobs=1,
                     class_weight="balanced_subsample",
@@ -528,67 +558,34 @@ def train_and_save(
             ),
         ]
     )
-    # Calibration needs enough samples per class. For very small datasets, skip calibration.
-    counts: dict[int, int] = {}
-    try:
-        for v in list(y_train):
-            iv = int(v)
-            counts[iv] = counts.get(iv, 0) + 1
-    except Exception:
-        counts = {}
-    min_class = min(counts.values()) if counts else 0
-    cv = min(3, int(min_class)) if min_class else 0
-    if cv >= 2:
-        cal = CalibratedClassifierCV(logreg, method="isotonic", cv=cv)
-        cal.fit(X_train, y_train)
-        base_model = cal
-    else:
-        logreg.fit(X_train, y_train)
-        base_model = logreg
 
-    # RF calibration only if enough samples per class; else fit raw.
-    if cv >= 2:
-        rf_cal = CalibratedClassifierCV(rf, method="isotonic", cv=cv)
-        rf_cal.fit(X_train, y_train)
-        rf_model = rf_cal
-    else:
-        rf.fit(X_train, y_train)
-        rf_model = rf
-
-    # LightGBM (if available)
-    lgbm_model = None
-    lgbm_cal = None
+    lgbm_pipe: Pipeline | None = None
     try:
         import lightgbm as lgb
 
-        lgbm_model = lgb.LGBMClassifier(
-            n_estimators=400,
-            learning_rate=0.05,
-            num_leaves=31,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            random_state=42,
-            class_weight="balanced",
-            min_child_samples=40,
-            reg_alpha=0.1,
-            min_gain_to_split=0.02,
-        )
         lgbm_pipe = Pipeline(
             steps=[
                 ("impute", SimpleImputer(strategy="median")),
-                ("clf", lgbm_model),
+                (
+                    "clf",
+                    lgb.LGBMClassifier(
+                        n_estimators=400,
+                        learning_rate=0.05,
+                        num_leaves=31,
+                        subsample=0.9,
+                        colsample_bytree=0.9,
+                        random_state=42,
+                        class_weight="balanced",
+                        min_child_samples=40,
+                        reg_alpha=0.1,
+                        min_gain_to_split=0.02,
+                    ),
+                ),
             ]
         )
-        if cv >= 2:
-            lgbm_cal = CalibratedClassifierCV(lgbm_pipe, method="isotonic", cv=cv)
-            lgbm_cal.fit(X_train, y_train)
-        else:
-            lgbm_pipe.fit(X_train, y_train)
-            lgbm_cal = lgbm_pipe
     except Exception:
-        lgbm_cal = None
+        lgbm_pipe = None
 
-    # Strong tabular baseline with built-in regularization (often competitive on mixed features).
     hgb_clf = Pipeline(
         steps=[
             ("impute", SimpleImputer(strategy="median")),
@@ -605,27 +602,64 @@ def train_and_save(
             ),
         ]
     )
-    if cv >= 2:
-        hgb_cal = CalibratedClassifierCV(hgb_clf, method="isotonic", cv=cv)
-        hgb_cal.fit(X_train, y_train)
-        hgb_model = hgb_cal
-    else:
-        hgb_clf.fit(X_train, y_train)
-        hgb_model = hgb_clf
 
-    def eval_model(m):
-        proba = m.predict_proba(X_test)[:, 1]
+    counts: dict[int, int] = {}
+    try:
+        for v in list(y_train):
+            iv = int(v)
+            counts[iv] = counts.get(iv, 0) + 1
+    except Exception:
+        counts = {}
+    min_class = min(counts.values()) if counts else 0
+    cv_full = min(3, int(min_class)) if min_class else 0
+    cal_method = "sigmoid" if (len(X_train) < 450 or int(min_class) < 45) else "isotonic"
+
+    use_inner = bool(len(X_train) >= 220)
+    cut_sel = max(45, int(len(X_train) * 0.72))
+    X_tr_src, y_tr_src = X_train, y_train
+    X_va, y_va = None, None
+    if use_inner and (len(X_train) - cut_sel) >= 35:
+        X_tr_src = X_train.iloc[:cut_sel]
+        y_tr_src = y_train.iloc[:cut_sel]
+        X_va = X_train.iloc[cut_sel:]
+        y_va = y_train.iloc[cut_sel:]
+        try:
+            if len({int(v) for v in list(y_tr_src)}) < 2 or len({int(v) for v in list(y_va)}) < 2:
+                use_inner = False
+                X_tr_src, y_tr_src = X_train, y_train
+                X_va, y_va = None, None
+        except Exception:
+            use_inner = False
+            X_tr_src, y_tr_src = X_train, y_train
+            X_va, y_va = None, None
+    else:
+        use_inner = False
+
+    cv_src = _cv_from_y_series(y_tr_src) if use_inner else cv_full
+
+    base_model = _fit_calibrated_pipeline(logreg, X_tr_src, y_tr_src, cv_n=cv_src, cal_method=cal_method)
+    rf_model = _fit_calibrated_pipeline(rf, X_tr_src, y_tr_src, cv_n=cv_src, cal_method=cal_method)
+    lgbm_model_f = (
+        _fit_calibrated_pipeline(lgbm_pipe, X_tr_src, y_tr_src, cv_n=cv_src, cal_method=cal_method)
+        if lgbm_pipe is not None
+        else None
+    )
+    hgb_model = _fit_calibrated_pipeline(hgb_clf, X_tr_src, y_tr_src, cv_n=cv_src, cal_method=cal_method)
+
+    def eval_model(m, Xev=None, yev=None):
+        Xh = X_test if Xev is None else Xev
+        yh = y_test if yev is None else yev
+        proba = m.predict_proba(Xh)[:, 1]
         pred = (proba >= 0.5).astype(int)
         tm = TrainMetrics(
-            n=int(len(y_test)),
-            pos_rate=float(np.mean(y_test)),
-            auc=_safe_auc(y_test, proba),
-            acc=float(accuracy_score(y_test, pred)),
+            n=int(len(yh)),
+            pos_rate=float(np.mean(yh)),
+            auc=_safe_auc(yh, proba),
+            acc=float(accuracy_score(yh, pred)),
         )
         cal = {}
         try:
-            cal["brier"] = float(brier_score_loss(y_test, proba))
-            # 5 bucket calibration summary: avg p vs empirical hit-rate
+            cal["brier"] = float(brier_score_loss(yh, proba))
             bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.000001]
             rows = []
             for lo, hi in zip(bins[:-1], bins[1:]):
@@ -637,23 +671,24 @@ def train_and_save(
                         "bin": f"{lo:.1f}-{min(1.0, hi):.1f}",
                         "n": int(np.sum(msk)),
                         "p_mean": float(np.mean(proba[msk])),
-                        "hit_rate": float(np.mean(np.asarray(y_test)[msk])),
+                        "hit_rate": float(np.mean(np.asarray(yh)[msk])),
                     }
                 )
             cal["calibration_bins"] = rows
         except Exception:
             cal = {}
-        ap = _safe_average_precision(y_test, proba)
+        ap = _safe_average_precision(yh, proba)
         extra = {
             "average_precision": ap,
-            "precision_at_10pct": _precision_at_k(y_test, proba, 0.10),
-            "precision_at_20pct": _precision_at_k(y_test, proba, 0.20),
-            "precision_at_30pct": _precision_at_k(y_test, proba, 0.30),
+            "precision_at_10pct": _precision_at_k(yh, proba, 0.10),
+            "precision_at_20pct": _precision_at_k(yh, proba, 0.20),
+            "precision_at_30pct": _precision_at_k(yh, proba, 0.30),
             **cal,
         }
         return tm, extra, proba
 
-    m_log, extra_log, proba_log = eval_model(base_model)
+    Xev, yev = (X_va, y_va) if use_inner else (None, None)
+    m_log, extra_log, proba_log = eval_model(base_model, Xev, yev)
     best = ("logreg", base_model, m_log, extra_log, proba_log)
 
     def model_score(m: TrainMetrics, extra: dict) -> float:
@@ -669,20 +704,37 @@ def train_and_save(
             return float(ap)
         return float(m.acc)
 
-    m_rf, extra_rf, proba_rf = eval_model(rf_model)
+    m_rf, extra_rf, proba_rf = eval_model(rf_model, Xev, yev)
     if model_score(m_rf, extra_rf) >= model_score(best[2], best[3]):
         best = ("rf", rf_model, m_rf, extra_rf, proba_rf)
-    if lgbm_cal is not None:
-        m_lgb, extra_lgb, proba_lgb = eval_model(lgbm_cal)
+    if lgbm_model_f is not None:
+        m_lgb, extra_lgb, proba_lgb = eval_model(lgbm_model_f, Xev, yev)
         if model_score(m_lgb, extra_lgb) >= model_score(best[2], best[3]):
-            best = ("lgbm", lgbm_cal, m_lgb, extra_lgb, proba_lgb)
+            best = ("lgbm", lgbm_model_f, m_lgb, extra_lgb, proba_lgb)
 
-    m_hgb, extra_hgb, proba_hgb = eval_model(hgb_model)
+    m_hgb, extra_hgb, proba_hgb = eval_model(hgb_model, Xev, yev)
     if model_score(m_hgb, extra_hgb) >= model_score(best[2], best[3]):
         best = ("hist_gbc", hgb_model, m_hgb, extra_hgb, proba_hgb)
 
-    provider, model, metrics, extra_metrics, proba_best = best
+    if use_inner:
+        templates: dict[str, Pipeline] = {"logreg": logreg, "rf": rf, "hist_gbc": hgb_clf}
+        if lgbm_pipe is not None:
+            templates["lgbm"] = lgbm_pipe
+        winner = str(best[0])
+        model = _fit_calibrated_pipeline(templates[winner], X_train, y_train, cv_n=cv_full, cal_method=cal_method)
+        provider = winner
+        metrics, extra_metrics, proba_best = eval_model(model)
+    else:
+        provider, model, metrics, extra_metrics, proba_best = best[0], best[1], best[2], best[3], best[4]
+
     outp.parent.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(extra_metrics, dict):
+        extra_metrics = {
+            **extra_metrics,
+            "calibration_method": str(cal_method),
+            "model_selection_inner_val": bool(use_inner),
+        }
 
     # Threshold sweep on TRAIN scores only (avoids optimistic threshold fit on the same test used for AUC).
     proba_tr = model.predict_proba(X_train)[:, 1]
@@ -690,7 +742,7 @@ def train_and_save(
     best_f1_tr = -1.0
     best_thr_precision_tr = 0.0
     try:
-        for thr in (0.50, 0.55, 0.60, 0.65, 0.70):
+        for thr in (0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80):
             pred = (proba_tr >= thr).astype(int)
             f1_thr = float(f1_score(y_train, pred, zero_division=0))
             prec_thr = float(precision_score(y_train, pred, zero_division=0))
