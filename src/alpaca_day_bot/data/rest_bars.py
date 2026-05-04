@@ -50,7 +50,7 @@ class RestBarPoller:
         # First fetch: include multiple market sessions so 15m RSI(14) can be ready
         # even early in the day (a same-day minute window may be too short).
         # Later fetches keep a small window to reduce payload.
-        start = (end - timedelta(days=3)) if self._wide_first_fetch else (end - timedelta(minutes=20))
+        start = (end - timedelta(days=7)) if self._wide_first_fetch else (end - timedelta(minutes=20))
 
         client = StockHistoricalDataClient(
             self._settings.apca_api_key_id,

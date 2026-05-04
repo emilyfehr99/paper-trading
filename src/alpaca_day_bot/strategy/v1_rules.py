@@ -345,8 +345,8 @@ class V1RulesSignalEngine(BaseStrategy):
 
         atr_ready = bool(atr is not None and atr_avg is not None)
         # Fail-open: ATR regime gating is a guardrail, not a hard requirement.
-        # If ATR isn't ready (common early when SIGNAL_TIMEFRAME=15m), skip the regime spike check
-        # rather than blocking all signals.
+        # If ATR isn't ready (common early when SIGNAL_TIMEFRAME=15m), skip all ATR-based
+        # gating/ratio logic rather than blocking signals.
         if atr_ready and atr_avg > 1e-12 and atr > atr_avg * float(self._atr_regime_max_mult):
             return StrategySignal(symbol, "HOLD", "atr_regime_spike")
 
@@ -358,11 +358,12 @@ class V1RulesSignalEngine(BaseStrategy):
         except Exception:
             adx_v = None
         atr_ratio = None
-        try:
-            if atr_ready and atr_avg and atr_avg > 1e-12:
-                atr_ratio = float(atr) / float(atr_avg)
-        except Exception:
-            atr_ratio = None
+        if atr_ready:
+            try:
+                if atr_avg and atr_avg > 1e-12:
+                    atr_ratio = float(atr) / float(atr_avg)
+            except Exception:
+                atr_ratio = None
         is_trend = bool(adx_v is not None and adx_v >= 22.0)
         is_low_vol = bool(atr_ratio is not None and atr_ratio < 1.15)
         good_regime = bool(is_trend and is_low_vol)
