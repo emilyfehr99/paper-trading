@@ -64,9 +64,10 @@ jobs:
           UNIVERSE_ENABLED: "false"
           MODEL_ENABLED: "false"
           # Weekend sizing + breadth.
-          MAX_NOTIONAL_PER_TRADE_USD: "300"
-          MAX_POSITIONS: "10"
-          MAX_TRADES_PER_DAY: "100"
+          MAX_NOTIONAL_PER_TRADE_USD: "800"
+          MAX_GROSS_EXPOSURE_PCT: "0.85"
+          MAX_POSITIONS: "12"
+          MAX_TRADES_PER_DAY: "200"
           MAX_DAILY_LOSS_PCT: "0.01"
           DAILY_PROFIT_TARGET_USD: "100"
           # Match paper-scheduled-tick (equity) for comparable trade cadence.

@@ -174,16 +174,16 @@ jobs:
           SIM_OPTIONS_LEVERAGE: "6"
           SIM_OPTIONS_NOTIONAL_USD: "50"
           # More aggressive risk + frequency (paper only)
-          MAX_POSITIONS: "25"
-          MAX_TRADES_PER_DAY: "200"
-          MAX_GROSS_EXPOSURE_PCT: "0.35"
+          MAX_POSITIONS: "30"
+          MAX_TRADES_PER_DAY: "350"
+          MAX_GROSS_EXPOSURE_PCT: "0.85"
           MAX_DAILY_LOSS_PCT: "0.01"
           # Hard per-trade spend cap
-          MAX_NOTIONAL_PER_TRADE_USD: "300"
-          RISK_PER_TRADE_PCT: "0.01"
-          PER_SYMBOL_COOLDOWN_S: "15"
+          MAX_NOTIONAL_PER_TRADE_USD: "800"
+          RISK_PER_TRADE_PCT: "0.015"
+          PER_SYMBOL_COOLDOWN_S: "10"
           # Keep whole-share sizing compatible with the per-trade cap
-          UNIVERSE_MAX_PRICE: "50"
+          UNIVERSE_MAX_PRICE: "150"
           UNIVERSE_MIN_PRICE: "5"
           # Loosen HTF trend gates so more setups qualify
           HTF_RSI_MIN: "32"
@@ -202,7 +202,7 @@ jobs:
           MIN_HOLD_MINUTES: "15"
           MAX_HOLD_MINUTES_DYNAMIC: "90"
           # Execution quality filters
-          MIN_VOLUME_RATIO_TRADE: "0.25"
+          MIN_VOLUME_RATIO_TRADE: "0.20"
           MAX_SHORT_POSITIONS: "5"
           # Flatten positions before close to avoid overnight holds
           FLATTEN_BEFORE_CLOSE_MINUTES: "5"
