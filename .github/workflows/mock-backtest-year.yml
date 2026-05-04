@@ -29,7 +29,7 @@ on:
 
 concurrency:
   group: alpaca-mock-backtest-year
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -37,6 +37,57 @@ env:
   SIM_DB: "state/ledgers/sim_rollup.sqlite3"
 
 jobs:
+  build_equity_universe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ (github.event_name == 'schedule') || (github.event.inputs.market == '' || github.event.inputs.market == 'both' || github.event.inputs.market == 'equity') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Build equity universe symbol list
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
+          python3 - <<'PY'
+          import os, json
+          from pathlib import Path
+          from alpaca_day_bot.universe import build_master_universe_assets, build_liquid_universe
+          api_key=os.environ["APCA_API_KEY_ID"].strip()
+          api_secret=os.environ["APCA_API_SECRET_KEY"].strip()
+          out_dir=Path("state/mock_cache")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          master_path=str(out_dir/"equity_master_universe.json")
+          master=build_master_universe_assets(api_key, api_secret, out_path=master_path, max_symbols=10000, require_shortable=False)
+          candidates=list(master.get("symbols") or [])
+          liquid_path=str(out_dir/"equity_liquid_universe.json")
+          uni=build_liquid_universe(api_key, api_secret, out_path=liquid_path, candidate_symbols=candidates, max_symbols=int(os.environ.get("EQUITY_MAX","500")), lookback_days=20, min_price=1.0, max_price=500.0, min_avg_dollar_vol=10_000_000.0)
+          syms=list(uni.selected or [])
+          Path("equity_symbols.json").write_text(json.dumps(syms), encoding="utf-8")
+          print(f"wrote {len(syms)} symbols")
+          PY
+
+      - name: Upload equity symbols
+        uses: actions/upload-artifact@v6
+        with:
+          name: equity-symbols-${{ github.run_id }}
+          path: equity_symbols.json
+          if-no-files-found: error
+
   build_crypto:
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -95,6 +146,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     if: ${{ (github.event_name == 'schedule') || (github.event.inputs.market == '' || github.event.inputs.market == 'both' || github.event.inputs.market == 'equity') }}
+    needs: [build_equity_universe]
     strategy:
       fail-fast: false
       matrix:
@@ -116,8 +168,6 @@ jobs:
         with:
           path: |
             state/mock_cache/equity_1m
-            state/mock_cache/equity_master_universe.json
-            state/mock_cache/equity_liquid_universe.json
           key: alpaca-mock-backtest-equity-${{ runner.os }}-${{ github.run_id }}-shard-${{ matrix.shard }}
           restore-keys: |
             alpaca-mock-backtest-equity-${{ runner.os }}-
@@ -125,31 +175,10 @@ jobs:
       - name: Install package
         run: pip install -e .
 
-      - name: Build equity universe + shard symbol list
-        id: shardlist
-        env:
-          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
-          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
-        run: |
-          set -euo pipefail
-          EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
-          python3 - <<'PY'
-          import os, json
-          from pathlib import Path
-          from alpaca_day_bot.universe import build_master_universe_assets, build_liquid_universe
-          api_key=os.environ["APCA_API_KEY_ID"].strip()
-          api_secret=os.environ["APCA_API_SECRET_KEY"].strip()
-          cache=Path("state/mock_cache")
-          cache.mkdir(parents=True, exist_ok=True)
-          master_path=str(cache/"equity_master_universe.json")
-          master=build_master_universe_assets(api_key, api_secret, out_path=master_path, max_symbols=10000, require_shortable=False)
-          candidates=list(master.get("symbols") or [])
-          liquid_path=str(cache/"equity_liquid_universe.json")
-          uni=build_liquid_universe(api_key, api_secret, out_path=liquid_path, candidate_symbols=candidates, max_symbols=int(os.environ.get("EQUITY_MAX","500")), lookback_days=20, min_price=1.0, max_price=500.0, min_avg_dollar_vol=10_000_000.0)
-          syms=list(uni.selected or [])
-          (cache/"equity_symbols.json").write_text(json.dumps(syms), encoding="utf-8")
-          print(len(syms))
-          PY
+      - name: Download equity symbols
+        uses: actions/download-artifact@v6
+        with:
+          name: equity-symbols-${{ github.run_id }}
 
       - name: Run 1y sim dataset (equity shard)
         env:
@@ -166,7 +195,7 @@ jobs:
           python3 - <<'PY' > /tmp/syms.csv
           import json, os
           from pathlib import Path
-          syms=json.loads((Path("state/mock_cache")/"equity_symbols.json").read_text(encoding="utf-8"))
+          syms=json.loads(Path("equity_symbols.json").read_text(encoding="utf-8"))
           shard=int(os.environ["SHARD"])
           shards=int(os.environ["SHARDS"])
           picked=[s for i,s in enumerate(syms) if (i % shards)==shard]
@@ -194,11 +223,12 @@ jobs:
   merge_and_train:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    needs: [build_crypto, build_equity_shards]
+    needs: [build_crypto, build_equity_universe, build_equity_shards]
     if: >-
       ${{
         always() &&
         (needs.build_crypto.result == 'success' || needs.build_crypto.result == 'skipped') &&
+        (needs.build_equity_universe.result == 'success' || needs.build_equity_universe.result == 'skipped') &&
         (needs.build_equity_shards.result == 'success' || needs.build_equity_shards.result == 'skipped')
       }}
     steps:
