@@ -37,9 +37,10 @@ env:
   SIM_DB: "state/ledgers/sim_rollup.sqlite3"
 
 jobs:
-  run:
+  build_crypto:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    if: ${{ (github.event_name == 'schedule') || (github.event.inputs.market == '' || github.event.inputs.market == 'both' || github.event.inputs.market == 'crypto') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -52,37 +53,181 @@ jobs:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
 
-      - name: Cache mock data + outputs
+      - name: Cache mock data (crypto)
         uses: actions/cache@v5
         with:
           path: |
-            state/mock_cache
-            state/ledgers
-            state/models
-            reports
-          key: alpaca-mock-backtest-${{ runner.os }}-${{ github.run_id }}
+            state/mock_cache/crypto
+          key: alpaca-mock-backtest-crypto-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            alpaca-mock-backtest-${{ runner.os }}-
+            alpaca-mock-backtest-crypto-${{ runner.os }}-
 
       - name: Install package
         run: pip install -e .
 
-      - name: Build 1y sim dataset (equity + crypto)
+      - name: Build 1y sim dataset (crypto)
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
         run: |
           set -euo pipefail
-          MARKET="${{ github.event.inputs.market || 'both' }}"
-          EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
           START="${{ github.event.inputs.start || '' }}"
           END="${{ github.event.inputs.end || '' }}"
+          OUT_DB="state/ledgers/sim_crypto.sqlite3"
 
-          ARGS=(--market "$MARKET" --equity-max-symbols "$EQUITY_MAX" --sim-db "${SIM_DB}" --report-path "reports/mock_backtest_latest.md")
+          ARGS=(--market "crypto" --sim-db "${OUT_DB}" --report-path "reports/mock_backtest_crypto_latest.md")
           if [ -n "$START" ] && [ -n "$END" ]; then
             ARGS+=(--start "$START" --end "$END")
           fi
           python3 tools/run_mock_backtest_year.py "${ARGS[@]}"
+
+      - name: Upload crypto sim shard
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: sim-shard-crypto-${{ github.run_id }}
+          path: |
+            state/ledgers/sim_crypto.sqlite3
+            reports/mock_backtest_crypto_latest.md
+          if-no-files-found: warn
+
+  build_equity_shards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    if: ${{ (github.event_name == 'schedule') || (github.event.inputs.market == '' || github.event.inputs.market == 'both' || github.event.inputs.market == 'equity') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
+
+      - name: Cache mock data (equity)
+        uses: actions/cache@v5
+        with:
+          path: |
+            state/mock_cache/equity_1m
+            state/mock_cache/equity_master_universe.json
+            state/mock_cache/equity_liquid_universe.json
+          key: alpaca-mock-backtest-equity-${{ runner.os }}-${{ github.run_id }}-shard-${{ matrix.shard }}
+          restore-keys: |
+            alpaca-mock-backtest-equity-${{ runner.os }}-
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Build equity universe + shard symbol list
+        id: shardlist
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
+          python3 - <<'PY'
+          import os, json
+          from pathlib import Path
+          from alpaca_day_bot.universe import build_master_universe_assets, build_liquid_universe
+          api_key=os.environ["APCA_API_KEY_ID"].strip()
+          api_secret=os.environ["APCA_API_SECRET_KEY"].strip()
+          cache=Path("state/mock_cache")
+          cache.mkdir(parents=True, exist_ok=True)
+          master_path=str(cache/"equity_master_universe.json")
+          master=build_master_universe_assets(api_key, api_secret, out_path=master_path, max_symbols=10000, require_shortable=False)
+          candidates=list(master.get("symbols") or [])
+          liquid_path=str(cache/"equity_liquid_universe.json")
+          uni=build_liquid_universe(api_key, api_secret, out_path=liquid_path, candidate_symbols=candidates, max_symbols=int(os.environ.get("EQUITY_MAX","500")), lookback_days=20, min_price=1.0, max_price=500.0, min_avg_dollar_vol=10_000_000.0)
+          syms=list(uni.selected or [])
+          (cache/"equity_symbols.json").write_text(json.dumps(syms), encoding="utf-8")
+          print(len(syms))
+          PY
+
+      - name: Run 1y sim dataset (equity shard)
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          START="${{ github.event.inputs.start || '' }}"
+          END="${{ github.event.inputs.end || '' }}"
+          SHARD=${{ matrix.shard }}
+          SHARDS=6
+          EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
+
+          python3 - <<'PY' > /tmp/syms.csv
+          import json, os
+          from pathlib import Path
+          syms=json.loads((Path("state/mock_cache")/"equity_symbols.json").read_text(encoding="utf-8"))
+          shard=int(os.environ["SHARD"])
+          shards=int(os.environ["SHARDS"])
+          picked=[s for i,s in enumerate(syms) if (i % shards)==shard]
+          print(",".join(picked))
+          PY
+
+          OUT_DB="state/ledgers/sim_equity_shard_${SHARD}.sqlite3"
+          SYMS="$(cat /tmp/syms.csv)"
+          ARGS=(--market "equity" --equity-max-symbols "$EQUITY_MAX" --equity-symbols "$SYMS" --sim-db "${OUT_DB}" --report-path "reports/mock_backtest_equity_shard_${SHARD}.md")
+          if [ -n "$START" ] && [ -n "$END" ]; then
+            ARGS+=(--start "$START" --end "$END")
+          fi
+          python3 tools/run_mock_backtest_year.py "${ARGS[@]}"
+
+      - name: Upload equity sim shard
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: sim-shard-equity-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            state/ledgers/sim_equity_shard_${{ matrix.shard }}.sqlite3
+            reports/mock_backtest_equity_shard_${{ matrix.shard }}.md
+          if-no-files-found: warn
+
+  merge_and_train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    needs: [build_crypto, build_equity_shards]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Download all sim shards
+        if: always()
+        uses: actions/download-artifact@v6
+        with:
+          path: state/ledgers/shards
+
+      - name: Merge shard sim DBs
+        run: |
+          set -euo pipefail
+          mkdir -p state/ledgers reports
+          # Merge whatever exists (equity shards and optional crypto shard)
+          INPUTS=()
+          while IFS= read -r -d '' f; do INPUTS+=("$f"); done < <(find state/ledgers/shards -name "*.sqlite3" -print0)
+          if [ ${#INPUTS[@]} -eq 0 ]; then
+            echo "No shard DBs found; failing."
+            exit 1
+          fi
+          python3 tools/merge_sim_rollups.py --out "${SIM_DB}" --in "${INPUTS[@]}"
 
       - name: Train sim models (BUY + SHORT)
         run: |
@@ -100,7 +245,13 @@ jobs:
             state/models/latest_buy_sim.json
             state/models/latest_short_sim.joblib
             state/models/latest_short_sim.json
-            reports/mock_backtest_latest.md
+            reports/mock_backtest_crypto_latest.md
+            reports/mock_backtest_equity_shard_0.md
+            reports/mock_backtest_equity_shard_1.md
+            reports/mock_backtest_equity_shard_2.md
+            reports/mock_backtest_equity_shard_3.md
+            reports/mock_backtest_equity_shard_4.md
+            reports/mock_backtest_equity_shard_5.md
             reports/sim_training_latest.md
           if-no-files-found: warn
 

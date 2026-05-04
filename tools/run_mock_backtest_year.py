@@ -36,6 +36,11 @@ def main() -> None:
     ap.add_argument("--equity-max-symbols", type=int, default=500)
     ap.add_argument("--equity-min-avg-dollar-vol", type=float, default=10_000_000.0)
     ap.add_argument("--equity-max-price", type=float, default=500.0)
+    ap.add_argument(
+        "--equity-symbols",
+        default="",
+        help="Optional comma-separated equity symbols to run (skips universe build when provided).",
+    )
     ap.add_argument("--starting-equity", type=float, default=100000.0)
     ap.add_argument("--risk-per-trade-pct", type=float, default=0.0025)
     ap.add_argument("--max-gross-exposure-pct", type=float, default=0.35)
@@ -119,29 +124,33 @@ def main() -> None:
     def run_equity() -> None:
         cache_root = Path(args.cache_dir)
         cache_root.mkdir(parents=True, exist_ok=True)
-        master_path = str(cache_root / "equity_master_universe.json")
-        master = build_master_universe_assets(
-            apca_api_key_id=api_key,
-            apca_api_secret_key=api_secret,
-            out_path=master_path,
-            max_symbols=10000,
-            require_shortable=False,
-        )
-        candidates = list(master.get("symbols") or [])
+        raw_syms = str(getattr(args, "equity_symbols", "") or "").strip()
+        if raw_syms:
+            symbols = [s.strip().upper() for s in raw_syms.split(",") if s.strip()]
+        else:
+            master_path = str(cache_root / "equity_master_universe.json")
+            master = build_master_universe_assets(
+                apca_api_key_id=api_key,
+                apca_api_secret_key=api_secret,
+                out_path=master_path,
+                max_symbols=10000,
+                require_shortable=False,
+            )
+            candidates = list(master.get("symbols") or [])
 
-        liquid_path = str(cache_root / "equity_liquid_universe.json")
-        uni = build_liquid_universe(
-            apca_api_key_id=api_key,
-            apca_api_secret_key=api_secret,
-            out_path=liquid_path,
-            candidate_symbols=candidates,
-            max_symbols=int(args.equity_max_symbols),
-            lookback_days=20,
-            min_price=1.0,
-            max_price=float(args.equity_max_price),
-            min_avg_dollar_vol=float(args.equity_min_avg_dollar_vol),
-        )
-        symbols = list(uni.selected or [])
+            liquid_path = str(cache_root / "equity_liquid_universe.json")
+            uni = build_liquid_universe(
+                apca_api_key_id=api_key,
+                apca_api_secret_key=api_secret,
+                out_path=liquid_path,
+                candidate_symbols=candidates,
+                max_symbols=int(args.equity_max_symbols),
+                lookback_days=20,
+                min_price=1.0,
+                max_price=float(args.equity_max_price),
+                min_avg_dollar_vol=float(args.equity_min_avg_dollar_vol),
+            )
+            symbols = list(uni.selected or [])
 
         eq_cache_dir = str(cache_root / "equity_1m")
         for sym in symbols:
