@@ -34,6 +34,7 @@ class V1RulesSignalEngine(BaseStrategy):
         atr_regime_max_mult: float = 2.0,
         signal_timeframe: str = "15m",
         macd_confirm_mode: str = "aligned_good_regime_else_cross",
+        crypto_momentum_setup: bool = False,
     ) -> None:
         self._rsi_pullback_max = rsi_pullback_max
         self._ema_trend_len = ema_trend_len
@@ -50,6 +51,7 @@ class V1RulesSignalEngine(BaseStrategy):
         self._atr_regime_max_mult = atr_regime_max_mult
         self._signal_timeframe = (signal_timeframe or "15m").strip().lower()
         self._macd_confirm_mode = (macd_confirm_mode or "aligned_good_regime_else_cross").strip().lower()
+        self._crypto_momentum_setup = bool(crypto_momentum_setup)
 
     def evaluate_setup(self, *, symbol: str, df_1m, df_15m) -> dict[str, Any]:
         """
@@ -491,6 +493,7 @@ class V1RulesSignalEngine(BaseStrategy):
                 "signal_timeframe": str(self._signal_timeframe),
                 "aggressive_mode": bool(self._aggressive_mode),
                 "macd_confirm_mode": str(self._macd_confirm_mode),
+                "crypto_momentum_setup": bool(self._crypto_momentum_setup),
             },
             "rule_votes": {"long": checks_long, "short": checks_short},
             "indicators_used": [
@@ -523,6 +526,22 @@ class V1RulesSignalEngine(BaseStrategy):
             macd_ok_long = (macd_bull_cross or macd_bull) if good_regime else macd_bull_cross
         vwap_ok_long = above_vwap if not self._aggressive_mode else True
         vol_ok_long = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
+
+        # Crypto-only momentum setup (MACD-first) — does not require RSI pullback.
+        # This is a different setup class (trend continuation), not a relaxation of the pullback gate.
+        if self._crypto_momentum_setup:
+            alligator_up = bool(features.get("alligator_trend_up") == 1.0)
+            rsi_ok_momo = 50.0 <= float(last["rsi"]) <= 78.0
+            vol_ok_momo = volume_ratio >= max(1.0, float(self._volume_confirm_mult))
+            checks_long.update(
+                {
+                    "alligator_trend_up": bool(alligator_up),
+                    "rsi_momo_band": bool(rsi_ok_momo),
+                    "vol_momo": bool(vol_ok_momo),
+                }
+            )
+            if htf_ok_long and alligator_up and rsi_ok_momo and above_ema and macd_bull and above_vwap and vol_ok_momo:
+                return StrategySignal(symbol, "BUY", "crypto_macd_alligator_momo", features=features)
 
         # Setup A: pullback entry (original)
         if htf_ok_long and rsi_pullback and above_ema and macd_ok_long and vwap_ok_long and vol_ok_long:

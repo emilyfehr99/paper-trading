@@ -1808,6 +1808,7 @@ def run(
         aggressive_mode=False,
         signal_timeframe=getattr(settings, "signal_timeframe", "15m"),
         macd_confirm_mode=getattr(settings, "macd_confirm_mode", "aligned_good_regime_else_cross"),
+        crypto_momentum_setup=bool(crypto_preset),
     )
     strategy_aggr = V1RulesSignalEngine(
         rsi_pullback_max=rsi_pb_max,
@@ -1820,6 +1821,7 @@ def run(
         aggressive_mode=True,
         signal_timeframe=getattr(settings, "signal_timeframe", "15m"),
         macd_confirm_mode=getattr(settings, "macd_confirm_mode", "aligned_good_regime_else_cross"),
+        crypto_momentum_setup=bool(crypto_preset),
     )
 
     if build_master_universe:

@@ -261,6 +261,7 @@ def build_signal_label_dataset(
         rs = (reason or "").strip().lower()
         x["setup_long_pullback"] = 1.0 if rs == "long_rsi_macd_vwap_volume" else 0.0
         x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
+        x["setup_crypto_macd_alligator_momo"] = 1.0 if rs == "crypto_macd_alligator_momo" else 0.0
         x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
         x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
         x["setup_short_rsi_overbought_fade"] = 1.0 if rs == "short_rsi_overbought_fade" else 0.0
