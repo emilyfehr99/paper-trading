@@ -195,6 +195,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     needs: [build_crypto, build_equity_shards]
+    if: >-
+      ${{
+        always() &&
+        (needs.build_crypto.result == 'success' || needs.build_crypto.result == 'skipped') &&
+        (needs.build_equity_shards.result == 'success' || needs.build_equity_shards.result == 'skipped')
+      }}
     steps:
       - uses: actions/checkout@v6
 
@@ -228,6 +234,10 @@ jobs:
             exit 1
           fi
           python3 tools/merge_sim_rollups.py --out "${SIM_DB}" --in "${INPUTS[@]}"
+          # Pull shard reports into ./reports so we can upload them easily
+          if compgen -G "state/ledgers/shards/**/*.md" > /dev/null; then
+            cp -f state/ledgers/shards/**/*.md reports/ || true
+          fi
 
       - name: Train sim models (BUY + SHORT)
         run: |
@@ -241,17 +251,12 @@ jobs:
           name: mock-backtest-sim-${{ github.run_id }}
           path: |
             state/ledgers/sim_rollup.sqlite3
+            state/ledgers/shards
             state/models/latest_buy_sim.joblib
             state/models/latest_buy_sim.json
             state/models/latest_short_sim.joblib
             state/models/latest_short_sim.json
-            reports/mock_backtest_crypto_latest.md
-            reports/mock_backtest_equity_shard_0.md
-            reports/mock_backtest_equity_shard_1.md
-            reports/mock_backtest_equity_shard_2.md
-            reports/mock_backtest_equity_shard_3.md
-            reports/mock_backtest_equity_shard_4.md
-            reports/mock_backtest_equity_shard_5.md
+            reports/mock_backtest_*.md
             reports/sim_training_latest.md
           if-no-files-found: warn
 
