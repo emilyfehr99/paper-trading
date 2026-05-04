@@ -1299,6 +1299,7 @@ def _run_in_window_trading_cycle(
         ml_bundle = _load_ml_model(getattr(settings, "model_path", "state/models/latest.joblib"))
 
     candidates_for_ml: list[dict] = []
+    asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
     for sym in _ordered_symbols(settings):
         if executor.has_position(sym):
             continue
