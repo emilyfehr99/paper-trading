@@ -345,6 +345,7 @@ def _run_in_window_trading_cycle(
 ) -> datetime:
     """One pass: optional signal_scan + per-symbol decisions. Returns updated last_signal_scan_ts."""
     market_now = t0.astimezone(settings.tzinfo())
+    asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
 
     equity = executor.get_account_equity()
     gross = executor.gross_exposure_usd()
@@ -796,25 +797,27 @@ def _run_in_window_trading_cycle(
             },
         )
 
-    market_open = market_now.replace(hour=9, minute=30, second=0, microsecond=0)
-    if settings.open_delay_minutes > 0 and market_now < (
-        market_open + timedelta(minutes=int(settings.open_delay_minutes))
-    ):
-        return last_signal_scan_ts
+    # Equity-specific gates (do not apply to 24/7 crypto).
+    if asset_class != "crypto":
+        market_open = market_now.replace(hour=9, minute=30, second=0, microsecond=0)
+        if settings.open_delay_minutes > 0 and market_now < (
+            market_open + timedelta(minutes=int(settings.open_delay_minutes))
+        ):
+            return last_signal_scan_ts
 
-    if settings.market_context_filter:
-        spy_5m = _run_sync(buffer.snapshot_resampled_df("SPY", "5min"))
-        if spy_5m is not None and not getattr(spy_5m, "empty", True):
-            try:
-                import pandas_ta as ta
+        if settings.market_context_filter:
+            spy_5m = _run_sync(buffer.snapshot_resampled_df("SPY", "5min"))
+            if spy_5m is not None and not getattr(spy_5m, "empty", True):
+                try:
+                    import pandas_ta as ta
 
-                tmp = spy_5m.copy()
-                tmp["rsi"] = ta.rsi(tmp["close"], length=14)
-                rsi = float(tmp["rsi"].iloc[-1])
-                if rsi < float(settings.spy_5m_rsi_min):
-                    return last_signal_scan_ts
-            except Exception:
-                pass
+                    tmp = spy_5m.copy()
+                    tmp["rsi"] = ta.rsi(tmp["close"], length=14)
+                    rsi = float(tmp["rsi"].iloc[-1])
+                    if rsi < float(settings.spy_5m_rsi_min):
+                        return last_signal_scan_ts
+                except Exception:
+                    pass
 
     def _try_submit_entry(
         *,
