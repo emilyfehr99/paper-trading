@@ -24,6 +24,7 @@ from sklearn.metrics import (
     mean_absolute_error,
     mean_squared_error,
     precision_score,
+    r2_score,
     recall_score,
     roc_auc_score,
 )
@@ -378,6 +379,7 @@ def train_and_save(
     # Widen purge when labels use longer horizons (overlapping forward windows).
     purge_minutes = max(240.0, float(min_horizon_minutes) * 8.0)
     split_time_based_train_test = False
+    row_embargo_rows = min(80, max(8, int(n * 0.03)))
     if cut_ts is not None and ts is not None:
         gap = pd.Timedelta(minutes=float(purge_minutes))
         train_mask = ts < (cut_ts - gap)
@@ -387,7 +389,7 @@ def train_and_save(
         split_time_based_train_test = True
     else:
         # Fallback: row-embargo (slightly wider vs row count when timestamps unavailable).
-        embargo = min(80, max(8, int(n * 0.03)))
+        embargo = int(row_embargo_rows)
         cut2 = min(n, cut + embargo)
         X_train, y_train = X.iloc[:cut], y.iloc[:cut]
         X_test, y_test = X.iloc[cut2:], y.iloc[cut2:]
@@ -448,6 +450,10 @@ def train_and_save(
         pred_te = reg.predict(X_test)
         rmse = float(np.sqrt(mean_squared_error(y_test_f, pred_te))) if len(y_test_f) else float("nan")
         mae_te = float(mean_absolute_error(y_test_f, pred_te)) if len(y_test_f) else float("nan")
+        try:
+            r2_te = float(r2_score(y_test_f, pred_te)) if len(y_test_f) >= 2 else float("nan")
+        except Exception:
+            r2_te = float("nan")
         pred_tr = reg.predict(X_train)
         y_cls_tr = (y_train_f.values > 0.0).astype(int)
         y_cls_te = (y_test_f.values > 0.0).astype(int)
@@ -525,7 +531,8 @@ def train_and_save(
             "n_test": int(len(X_test)),
             "split_time_based_train_test": bool(split_time_based_train_test),
             "train_test_purge_minutes": float(purge_minutes) if split_time_based_train_test else None,
-            "metrics": {"rmse": rmse, "mae": mae_te, "n": int(len(y_test_f))},
+            "train_test_row_embargo": int(row_embargo_rows) if not split_time_based_train_test else None,
+            "metrics": {"rmse": rmse, "mae": mae_te, "r2": r2_te, "n": int(len(y_test_f))},
             "extra_metrics": {
                 "gate_f1_positive_return_train_select": float(best_f1_gate),
                 "gate_precision_positive_return_train_select": float(best_prec_gate),
@@ -713,13 +720,18 @@ def train_and_save(
         counts = {}
     min_class = min(counts.values()) if counts else 0
     cv_full = min(3, int(min_class)) if min_class else 0
-    cal_method = "sigmoid" if (len(X_train) < 450 or int(min_class) < 45) else "isotonic"
+    cal_method = (
+        "sigmoid"
+        if (len(X_train) < 450 or int(min_class) < 45 or int(cv_full) < 3)
+        else "isotonic"
+    )
 
     use_inner = bool(len(X_train) >= 220)
     cut_sel = max(45, int(len(X_train) * 0.72))
     X_tr_src, y_tr_src = X_train, y_train
     X_va, y_va = None, None
     inner_val_time_ordered = False
+    inner_val_boundary_gap_rows = 0
     if use_inner and (len(X_train) - cut_sel) >= 35:
         placed = False
         try:
@@ -729,10 +741,17 @@ def train_and_save(
                 X_sorted = X_train.loc[idx_sorted]
                 y_sorted = y_train.loc[idx_sorted]
                 cut_t = max(45, int(len(X_sorted) * 0.72))
-                if len(X_sorted) - cut_t >= 35:
-                    X_tr_src, y_tr_src = X_sorted.iloc[:cut_t], y_sorted.iloc[:cut_t]
+                gap_rows = max(5, int(len(X_sorted) * 0.02))
+                cut_fit_end = max(45, int(cut_t) - int(gap_rows))
+                if (
+                    cut_fit_end >= 35
+                    and len(X_sorted) - cut_t >= 35
+                    and cut_fit_end < cut_t
+                ):
+                    X_tr_src, y_tr_src = X_sorted.iloc[:cut_fit_end], y_sorted.iloc[:cut_fit_end]
                     X_va, y_va = X_sorted.iloc[cut_t:], y_sorted.iloc[cut_t:]
                     inner_val_time_ordered = True
+                    inner_val_boundary_gap_rows = int(gap_rows)
                     placed = True
         except Exception:
             pass
@@ -747,11 +766,13 @@ def train_and_save(
                 X_tr_src, y_tr_src = X_train, y_train
                 X_va, y_va = None, None
                 inner_val_time_ordered = False
+                inner_val_boundary_gap_rows = 0
         except Exception:
             use_inner = False
             X_tr_src, y_tr_src = X_train, y_train
             X_va, y_va = None, None
             inner_val_time_ordered = False
+            inner_val_boundary_gap_rows = 0
     else:
         use_inner = False
 
@@ -887,6 +908,7 @@ def train_and_save(
             "model_selection_inner_val": bool(use_inner),
             "model_selection_score_blend": "with_mcc:0.46*auc+0.27*ap-0.12*brier+0.07*mcc_norm+0.08*balacc;else_legacy",
             "inner_val_time_ordered": bool(inner_val_time_ordered),
+            "inner_val_boundary_gap_rows": int(inner_val_boundary_gap_rows),
             "calibration_ensemble": "false_lt_380_rows_else_auto",
             "calibration_cv": "stratified_kfold_shuffle_true_rs42",
             "hist_gbc_early_stopping": bool(hgb_params.get("early_stopping", False)),
@@ -1016,6 +1038,7 @@ def train_and_save(
         "test_pos_rate": float(np.mean(y_test)) if len(y_test) else float("nan"),
         "split_time_based_train_test": bool(split_time_based_train_test),
         "train_test_purge_minutes": float(purge_minutes) if split_time_based_train_test else None,
+        "train_test_row_embargo": int(row_embargo_rows) if not split_time_based_train_test else None,
         "feature_columns": list(X_train.columns),
         "rows_seen": int(len(meta)),
         "explainability": feature_importance,

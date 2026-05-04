@@ -314,6 +314,20 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
                 task="classification",
                 regression_pred=None,
             )
+        rowp = np.asarray(pr[0], dtype=float).ravel()
+        try:
+            sm = float(np.sum(rowp))
+        except Exception:
+            sm = float("nan")
+        if not math.isfinite(sm) or abs(sm - 1.0) > 0.03:
+            return ModelDecision(
+                ok=False,
+                provider=provider,
+                proba=None,
+                error="invalid_proba_mass",
+                task="classification",
+                regression_pred=None,
+            )
         p_raw = float(pr[0, 1])
         if not math.isfinite(p_raw):
             return ModelDecision(
