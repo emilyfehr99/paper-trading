@@ -282,6 +282,8 @@ class V1RulesSignalEngine(BaseStrategy):
                 df = pd.concat([df, bb], axis=1)
             except Exception:
                 pass
+        # ATR on df_base is useful for features, but NOT stable for regime gating when df_base is 15m.
+        # We compute the regime gate on 1m bars so the lookback (default 50) behaves consistently.
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(self._atr_len))
         df["atr_avg"] = df["atr"].rolling(int(self._atr_regime_lookback)).mean()
         adx = ta.adx(df["high"], df["low"], df["close"], length=14)
@@ -311,9 +313,35 @@ class V1RulesSignalEngine(BaseStrategy):
         htf_ok_long = htf_rsi_v >= float(self._htf_rsi_min)
         htf_ok_short = htf_rsi_v <= float(self._htf_rsi_max_short)
 
-        # Volatility regime guard: skip if ATR > k * average ATR
-        atr = float(last.get("atr")) if not pd.isna(last.get("atr")) else None
-        atr_avg = float(last.get("atr_avg")) if not pd.isna(last.get("atr_avg")) else None
+        # Volatility regime guard: skip if ATR > k * average ATR.
+        # IMPORTANT: When decisions are made on 15m bars, `atr_avg` warmup would take ~12.5h (50 * 15m).
+        # Use 1m bars for ATR regime gating so this never blocks intraday.
+        atr = None
+        atr_avg = None
+        try:
+            if df_1m is not None and not getattr(df_1m, "empty", True):
+                dfv = df_1m.copy()
+                try:
+                    dfv.index = pd.to_datetime(dfv.index, utc=True)
+                except Exception:
+                    pass
+                if hasattr(dfv.index, "duplicated"):
+                    dfv = dfv[~dfv.index.duplicated(keep="last")]
+                dfv = dfv.sort_index()
+                if all(c in dfv.columns for c in ("high", "low", "close")):
+                    dfv_atr = ta.atr(dfv["high"], dfv["low"], dfv["close"], length=int(self._atr_len))
+                    if dfv_atr is not None:
+                        dfv = dfv.assign(atr=dfv_atr)
+                        dfv = dfv.assign(atr_avg=dfv["atr"].rolling(int(self._atr_regime_lookback)).mean())
+                        lv = dfv.iloc[-1]
+                        atr = float(lv.get("atr")) if not pd.isna(lv.get("atr")) else None
+                        atr_avg = float(lv.get("atr_avg")) if not pd.isna(lv.get("atr_avg")) else None
+        except Exception:
+            atr = None
+            atr_avg = None
+        if atr is None or atr_avg is None:
+            atr = float(last.get("atr")) if not pd.isna(last.get("atr")) else None
+            atr_avg = float(last.get("atr_avg")) if not pd.isna(last.get("atr_avg")) else None
         if atr is None or atr_avg is None:
             return StrategySignal(symbol, "HOLD", "atr_not_ready")
         if atr_avg > 1e-12 and atr > atr_avg * float(self._atr_regime_max_mult):
