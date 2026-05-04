@@ -23,7 +23,11 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingRegressor
+from sklearn.ensemble import (
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+    RandomForestClassifier,
+)
 
 from alpaca_day_bot.ml.dataset import build_signal_label_dataset
 from alpaca_day_bot.ml.executed_dataset import build_executed_trade_dataset
@@ -67,6 +71,39 @@ def _precision_at_k(y_true, y_score, k_frac: float) -> float | None:
         return float(np.mean(yt))
     except Exception:
         return None
+
+
+def _drop_low_variance_numeric_columns(
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    *,
+    min_non_na: int = 12,
+    var_eps: float = 1e-12,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """
+    Remove numeric columns that are (near) constant on the train split — they add no signal
+    but increase overfitting risk for tree models.
+    """
+    drop: list[str] = []
+    for col in list(X_train.columns):
+        if col not in X_train.columns:
+            continue
+        if not pd.api.types.is_numeric_dtype(X_train[col]):
+            continue
+        s = pd.to_numeric(X_train[col], errors="coerce")
+        if int(s.notna().sum()) < int(min_non_na):
+            continue
+        try:
+            v = float(s.var(skipna=True))
+        except Exception:
+            v = float("nan")
+        if not np.isfinite(v) or v <= float(var_eps):
+            drop.append(str(col))
+    if not drop:
+        return X_train, X_test, []
+    Xt2 = X_train.drop(columns=drop, errors="ignore").copy()
+    Xe2 = X_test.drop(columns=drop, errors="ignore").copy()
+    return Xt2, Xe2, drop
 
 
 def _training_quality_mask(X: pd.DataFrame) -> pd.Series:
@@ -292,8 +329,28 @@ def train_and_save(
         X_train, X_test = X.iloc[:cut], X.iloc[cut:]
         y_train, y_test = y.iloc[:cut], y.iloc[cut:]
 
+    X_train, X_test, dropped_var_cols = _drop_low_variance_numeric_columns(X_train, X_test)
+
     outp = Path(out_path)
     outp.parent.mkdir(parents=True, exist_ok=True)
+
+    if int(X_train.shape[1]) <= 0 or len(X_train) < int(min_rows):
+        payload = {
+            "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+            "db_path": db_path,
+            "min_horizon_minutes": float(min_horizon_minutes),
+            "skipped": True,
+            "skip_reason": "insufficient_rows_or_features_after_column_pruning",
+            "n_train": int(len(X_train)),
+            "n_features": int(X_train.shape[1]),
+            "min_required": int(min_rows),
+            "dataset_kind": ds_kind,
+            "action": act,
+            "target_mode": tm,
+            "dropped_constant_features": dropped_var_cols,
+        }
+        (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
 
     if is_regression:
         y_train_f = pd.to_numeric(y_train, errors="coerce").astype(float)
@@ -338,7 +395,10 @@ def train_and_save(
         try:
             if hasattr(reg, "feature_importances_"):
                 fi = sorted(
-                    [{"feature": c, "importance": float(v)} for c, v in zip(list(X.columns), list(reg.feature_importances_))],
+                    [
+                        {"feature": c, "importance": float(v)}
+                        for c, v in zip(list(X_train.columns), list(reg.feature_importances_))
+                    ],
                     key=lambda r: -r["importance"],
                 )[:30]
         except Exception:
@@ -362,13 +422,36 @@ def train_and_save(
             },
             "recommended_regression_min": float(best_thr),
             "recommended_min_proba": None,
-            "feature_columns": list(X.columns),
+            "feature_columns": list(X_train.columns),
             "rows_seen": int(len(meta)),
             "explainability": fi,
+            "dropped_constant_features": dropped_var_cols,
         }
         joblib.dump({"model": reg, "meta": payload}, outp)
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
+
+    # Holdout must contain both classes for meaningful ranking metrics (AUC / PR-AUC).
+    try:
+        if len(y_test) >= 8:
+            yt_set = {int(v) for v in list(y_test)}
+            if len(yt_set) < 2:
+                payload = {
+                    "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+                    "db_path": db_path,
+                    "min_horizon_minutes": float(min_horizon_minutes),
+                    "skipped": True,
+                    "skip_reason": "test_set_single_class",
+                    "n_test": int(len(y_test)),
+                    "dataset_kind": ds_kind,
+                    "action": act,
+                    "target_mode": tm,
+                    "dropped_constant_features": dropped_var_cols,
+                }
+                (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                return payload
+    except Exception:
+        pass
 
     # If training has only one class, fall back to a constant-probability baseline.
     try:
@@ -401,9 +484,10 @@ def train_and_save(
             "metrics": asdict(metrics),
             "extra_metrics": {},
             "recommended_min_proba": 0.5,
-            "feature_columns": list(X.columns),
+            "feature_columns": list(X_train.columns),
             "rows_seen": int(len(meta)),
             "explainability": None,
+            "dropped_constant_features": dropped_var_cols,
         }
         joblib.dump({"model": model, "meta": payload}, outp)
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -419,6 +503,9 @@ def train_and_save(
                     max_iter=2000,
                     n_jobs=1,
                     class_weight="balanced",
+                    C=0.25,
+                    penalty="l2",
+                    solver="lbfgs",
                 ),
             ),
         ]
@@ -482,6 +569,9 @@ def train_and_save(
             colsample_bytree=0.9,
             random_state=42,
             class_weight="balanced",
+            min_child_samples=40,
+            reg_alpha=0.1,
+            min_gain_to_split=0.02,
         )
         lgbm_pipe = Pipeline(
             steps=[
@@ -497,6 +587,31 @@ def train_and_save(
             lgbm_cal = lgbm_pipe
     except Exception:
         lgbm_cal = None
+
+    # Strong tabular baseline with built-in regularization (often competitive on mixed features).
+    hgb_clf = Pipeline(
+        steps=[
+            ("impute", SimpleImputer(strategy="median")),
+            (
+                "clf",
+                HistGradientBoostingClassifier(
+                    max_depth=7,
+                    max_iter=350,
+                    learning_rate=0.06,
+                    l2_regularization=1.0,
+                    min_samples_leaf=20,
+                    random_state=42,
+                ),
+            ),
+        ]
+    )
+    if cv >= 2:
+        hgb_cal = CalibratedClassifierCV(hgb_clf, method="isotonic", cv=cv)
+        hgb_cal.fit(X_train, y_train)
+        hgb_model = hgb_cal
+    else:
+        hgb_clf.fit(X_train, y_train)
+        hgb_model = hgb_clf
 
     def eval_model(m):
         proba = m.predict_proba(X_test)[:, 1]
@@ -542,10 +657,14 @@ def train_and_save(
     best = ("logreg", base_model, m_log, extra_log, proba_log)
 
     def model_score(m: TrainMetrics, extra: dict) -> float:
-        """Prefer ROC-AUC; if undefined (degenerate labels), use PR-AUC then accuracy."""
+        """
+        Prefer a stable blend of ROC-AUC and PR-AUC under imbalance; fall back to accuracy.
+        """
+        ap = extra.get("average_precision") if isinstance(extra, dict) else None
+        if m.auc is not None and ap is not None:
+            return 0.62 * float(m.auc) + 0.38 * float(ap)
         if m.auc is not None:
             return float(m.auc)
-        ap = extra.get("average_precision") if isinstance(extra, dict) else None
         if ap is not None:
             return float(ap)
         return float(m.acc)
@@ -557,6 +676,10 @@ def train_and_save(
         m_lgb, extra_lgb, proba_lgb = eval_model(lgbm_cal)
         if model_score(m_lgb, extra_lgb) >= model_score(best[2], best[3]):
             best = ("lgbm", lgbm_cal, m_lgb, extra_lgb, proba_lgb)
+
+    m_hgb, extra_hgb, proba_hgb = eval_model(hgb_model)
+    if model_score(m_hgb, extra_hgb) >= model_score(best[2], best[3]):
+        best = ("hist_gbc", hgb_model, m_hgb, extra_hgb, proba_hgb)
 
     provider, model, metrics, extra_metrics, proba_best = best
     outp.parent.mkdir(parents=True, exist_ok=True)
@@ -591,29 +714,32 @@ def train_and_save(
     # Save simple explainability artifacts
     feature_importance = None
     try:
-        if provider == "lgbm":
-            # CalibratedClassifierCV -> base_estimator pipeline in cv estimators; use the first fitted one.
-            est0 = getattr(model, "calibrated_classifiers_", [None])[0]
-            base = getattr(est0, "estimator", None)
-            clf = None
-            if base is not None and hasattr(base, "named_steps"):
-                clf = base.named_steps.get("clf")
+        clf = None
+        if provider in ("lgbm", "hist_gbc"):
+            # CalibratedClassifierCV -> base pipeline; uncalibrated hist_gbc is a bare Pipeline.
+            est0 = getattr(model, "calibrated_classifiers_", None)
+            if isinstance(est0, list) and est0:
+                base = getattr(est0[0], "estimator", None)
+                if base is not None and hasattr(base, "named_steps"):
+                    clf = base.named_steps.get("clf")
+            if clf is None and isinstance(model, Pipeline):
+                clf = model.named_steps.get("clf")
             if clf is not None and hasattr(clf, "feature_importances_"):
                 fi = list(getattr(clf, "feature_importances_"))
                 feature_importance = sorted(
-                    [{"feature": c, "importance": float(v)} for c, v in zip(list(X.columns), fi)],
+                    [{"feature": c, "importance": float(v)} for c, v in zip(list(X_train.columns), fi)],
                     key=lambda r: -r["importance"],
                 )[:30]
         else:
             # LogisticRegression coefficients (approx; calibrated wrapper)
             est0 = getattr(model, "calibrated_classifiers_", [None])[0]
             base = getattr(est0, "estimator", None)
-            clf = None
+            clf_lr = None
             if base is not None and hasattr(base, "named_steps"):
-                clf = base.named_steps.get("clf")
-            if clf is not None and hasattr(clf, "coef_"):
-                coefs = list(clf.coef_[0])
-                pairs = [{"feature": c, "coef": float(v)} for c, v in zip(list(X.columns), coefs)]
+                clf_lr = base.named_steps.get("clf")
+            if clf_lr is not None and hasattr(clf_lr, "coef_"):
+                coefs = list(clf_lr.coef_[0])
+                pairs = [{"feature": c, "coef": float(v)} for c, v in zip(list(X_train.columns), coefs)]
                 feature_importance = {
                     "top_positive": sorted(pairs, key=lambda r: -r["coef"])[:15],
                     "top_negative": sorted(pairs, key=lambda r: r["coef"])[:15],
@@ -636,9 +762,10 @@ def train_and_save(
         "recommended_min_proba": best_thr,
         "recommended_threshold_metric": "f1_then_precision_on_train",
         "recommended_threshold_f1_test": float(f1_te_applied),
-        "feature_columns": list(X.columns),
+        "feature_columns": list(X_train.columns),
         "rows_seen": int(len(meta)),
         "explainability": feature_importance,
+        "dropped_constant_features": dropped_var_cols,
     }
     joblib.dump({"model": model, "meta": payload}, outp)
     (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
