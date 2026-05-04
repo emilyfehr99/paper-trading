@@ -8,6 +8,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+import pandas as pd
 from sklearn.dummy import DummyClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
@@ -17,11 +18,12 @@ from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
     f1_score,
+    mean_squared_error,
     precision_score,
     roc_auc_score,
 )
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingRegressor
 
 from alpaca_day_bot.ml.dataset import build_signal_label_dataset
 from alpaca_day_bot.ml.executed_dataset import build_executed_trade_dataset
@@ -76,10 +78,16 @@ def train_and_save(
     action: str = "BUY",  # BUY | SHORT
     min_class_count: int = 30,
     dataset_source: str = "auto",  # auto | executed | signals | sim
+    target_mode: str = "binary",
+    min_edge_bps: float = 10.0,
 ) -> dict:
     act = (action or "").strip().upper() or "BUY"
     if act not in ("BUY", "SHORT"):
         act = "BUY"
+
+    tm = (target_mode or "binary").strip().lower()
+    if tm not in ("binary", "beat_fee_bps", "regression_r", "regression_return_pct"):
+        tm = "binary"
 
     src = (dataset_source or "auto").strip().lower()
     if src not in ("auto", "executed", "signals", "sim"):
@@ -91,11 +99,22 @@ def train_and_save(
     meta = None
 
     if src == "sim":
-        ds = build_sim_trade_dataset(db_path=db_path, actions=(act,))
+        ds = build_sim_trade_dataset(
+            db_path=db_path,
+            actions=(act,),
+            target_mode=tm,
+            min_edge_bps=float(min_edge_bps),
+        )
         X, y, meta = ds.X, ds.y, ds.meta
         ds_kind = "sim_trades"
     elif src == "signals":
-        ds = build_signal_label_dataset(db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=(act,))
+        ds = build_signal_label_dataset(
+            db_path=db_path,
+            min_horizon_minutes=min_horizon_minutes,
+            actions=(act,),
+            target_mode=tm,
+            min_edge_bps=float(min_edge_bps),
+        )
         X, y, meta = ds.X, ds.y, ds.meta
         ds_kind = "signals"
     else:
@@ -108,6 +127,8 @@ def train_and_save(
                     db_path=db_path,
                     min_trades=max(10, int(min_rows)),
                     direction=want_dir,
+                    target_mode=tm,
+                    min_edge_bps=float(min_edge_bps),
                 )
             except Exception:
                 exec_ds = None
@@ -117,7 +138,14 @@ def train_and_save(
             ds_kind = f"executed_trades:{'long' if act == 'BUY' else 'short'}"
         else:
             # Fall back to triple-barrier / forward-return labels from signals.
-            ds = build_signal_label_dataset(db_path=db_path, min_horizon_minutes=min_horizon_minutes, actions=(act,))
+            sig_tm = "regression_return_pct" if tm == "regression_r" else tm
+            ds = build_signal_label_dataset(
+                db_path=db_path,
+                min_horizon_minutes=min_horizon_minutes,
+                actions=(act,),
+                target_mode=sig_tm,
+                min_edge_bps=float(min_edge_bps),
+            )
             X, y, meta = ds.X, ds.y, ds.meta
             ds_kind = "signals"
 
@@ -140,39 +168,76 @@ def train_and_save(
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
-    # Refuse to train on one-class or tiny-class datasets (noise fitting hurts accuracy).
-    try:
-        y_int = [int(v) for v in list(y)]
-        n_pos = int(sum(1 for v in y_int if v == 1))
-        n_neg = int(sum(1 for v in y_int if v == 0))
-    except Exception:
-        n_pos, n_neg = 0, 0
-    if min(n_pos, n_neg) < int(min_class_count):
-        outp = Path(out_path)
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "trained_at": datetime.now(tz=timezone.utc).isoformat(),
-            "db_path": db_path,
-            "min_horizon_minutes": float(min_horizon_minutes),
-            "skipped": True,
-            "skip_reason": "insufficient_class_balance",
-            "n_labeled": int(len(X)),
-            "n_pos": int(n_pos),
-            "n_neg": int(n_neg),
-            "min_class_count": int(min_class_count),
-            "dataset_kind": ds_kind,
-            "action": act,
-        }
-        (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return payload
+    is_regression = tm in ("regression_r", "regression_return_pct")
+
+    # Refuse weak datasets: class balance (classification) or near-constant targets (regression).
+    if not is_regression:
+        try:
+            y_int = [int(v) for v in list(y)]
+            n_pos = int(sum(1 for v in y_int if v == 1))
+            n_neg = int(sum(1 for v in y_int if v == 0))
+        except Exception:
+            n_pos, n_neg = 0, 0
+        if min(n_pos, n_neg) < int(min_class_count):
+            outp = Path(out_path)
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+                "db_path": db_path,
+                "min_horizon_minutes": float(min_horizon_minutes),
+                "skipped": True,
+                "skip_reason": "insufficient_class_balance",
+                "n_labeled": int(len(X)),
+                "n_pos": int(n_pos),
+                "n_neg": int(n_neg),
+                "min_class_count": int(min_class_count),
+                "dataset_kind": ds_kind,
+                "action": act,
+                "target_mode": tm,
+            }
+            (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return payload
+    else:
+        ys = pd.to_numeric(y, errors="coerce")
+        if int(ys.notna().sum()) < int(min_rows):
+            outp = Path(out_path)
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+                "db_path": db_path,
+                "min_horizon_minutes": float(min_horizon_minutes),
+                "skipped": True,
+                "skip_reason": "regression_insufficient_rows",
+                "n_labeled": int(len(X)),
+                "min_required": int(min_rows),
+                "dataset_kind": ds_kind,
+                "action": act,
+                "target_mode": tm,
+            }
+            (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return payload
+        if float(ys.std(skipna=True)) < 1e-10:
+            outp = Path(out_path)
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+                "db_path": db_path,
+                "min_horizon_minutes": float(min_horizon_minutes),
+                "skipped": True,
+                "skip_reason": "regression_near_constant_target",
+                "n_labeled": int(len(X)),
+                "dataset_kind": ds_kind,
+                "action": act,
+                "target_mode": tm,
+            }
+            (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return payload
 
     # Chronological split (reduce leakage): last 25% as test, with a small embargo to reduce overlap.
     n = len(X)
     cut = max(10, int(n * 0.75))
     # Time-series purging: enforce a 60-minute "dead zone" around the split timestamp.
     try:
-        import pandas as pd
-
         ts = pd.to_datetime(meta["ts"], utc=True, errors="coerce")
     except Exception:
         ts = None
@@ -205,6 +270,78 @@ def train_and_save(
         X_train, X_test = X.iloc[:cut], X.iloc[cut:]
         y_train, y_test = y.iloc[:cut], y.iloc[cut:]
 
+    outp = Path(out_path)
+    outp.parent.mkdir(parents=True, exist_ok=True)
+
+    if is_regression:
+        y_train_f = pd.to_numeric(y_train, errors="coerce").astype(float)
+        y_test_f = pd.to_numeric(y_test, errors="coerce").astype(float)
+        reg = HistGradientBoostingRegressor(
+            max_depth=10,
+            max_iter=500,
+            learning_rate=0.05,
+            l2_regularization=1.0,
+            random_state=42,
+        )
+        reg.fit(X_train, y_train_f)
+        pred_te = reg.predict(X_test)
+        rmse = float(np.sqrt(mean_squared_error(y_test_f, pred_te))) if len(y_test_f) else float("nan")
+        y_cls = (y_test_f.values > 0.0).astype(int)
+        best_thr = float(np.median(pred_te)) if len(pred_te) else 0.0
+        best_f1_gate = -1.0
+        best_prec_gate = 0.0
+        try:
+            qu = np.unique(np.quantile(pred_te, np.linspace(0.05, 0.95, 29)))
+            for thr in qu:
+                if not np.isfinite(thr):
+                    continue
+                pred_bin = (pred_te >= float(thr)).astype(int)
+                if int(np.sum(pred_bin)) < 5:
+                    continue
+                f1g = float(f1_score(y_cls, pred_bin, zero_division=0))
+                pre_g = float(precision_score(y_cls, pred_bin, zero_division=0))
+                if f1g > best_f1_gate or (f1g == best_f1_gate and pre_g > best_prec_gate):
+                    best_f1_gate = f1g
+                    best_prec_gate = pre_g
+                    best_thr = float(thr)
+        except Exception:
+            pass
+
+        fi = None
+        try:
+            if hasattr(reg, "feature_importances_"):
+                fi = sorted(
+                    [{"feature": c, "importance": float(v)} for c, v in zip(list(X.columns), list(reg.feature_importances_))],
+                    key=lambda r: -r["importance"],
+                )[:30]
+        except Exception:
+            fi = None
+
+        payload = {
+            "trained_at": datetime.now(tz=timezone.utc).isoformat(),
+            "db_path": db_path,
+            "min_horizon_minutes": float(min_horizon_minutes),
+            "provider": "hist_gbr",
+            "dataset_kind": ds_kind,
+            "action": act,
+            "target_mode": tm,
+            "min_edge_bps": float(min_edge_bps),
+            "task": "regression",
+            "metrics": {"rmse": rmse, "n": int(len(y_test_f))},
+            "extra_metrics": {
+                "gate_f1_positive_return": float(best_f1_gate),
+                "gate_precision_positive_return": float(best_prec_gate),
+            },
+            "recommended_regression_min": float(best_thr),
+            "recommended_min_proba": None,
+            "feature_columns": list(X.columns),
+            "rows_seen": int(len(meta)),
+            "explainability": fi,
+        }
+        joblib.dump({"model": reg, "meta": payload}, outp)
+        (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
     # If training has only one class, fall back to a constant-probability baseline.
     try:
         yuniq = set(int(v) for v in list(y_train))
@@ -224,8 +361,6 @@ def train_and_save(
             if len(y_test)
             else 1.0,
         )
-        outp = Path(out_path)
-        outp.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "trained_at": datetime.now(tz=timezone.utc).isoformat(),
             "db_path": db_path,
@@ -233,6 +368,8 @@ def train_and_save(
             "provider": provider,
             "dataset_kind": ds_kind,
             "action": act,
+            "target_mode": tm,
+            "task": "classification",
             "metrics": asdict(metrics),
             "extra_metrics": {},
             "recommended_min_proba": 0.5,
@@ -394,7 +531,6 @@ def train_and_save(
             best = ("lgbm", lgbm_cal, m_lgb, extra_lgb, proba_lgb)
 
     provider, model, metrics, extra_metrics, proba_best = best
-    outp = Path(out_path)
     outp.parent.mkdir(parents=True, exist_ok=True)
 
     # Threshold sweep for operational gating: prefer F1 (class imbalance), then precision.
@@ -453,6 +589,9 @@ def train_and_save(
         "provider": provider,
         "dataset_kind": ds_kind,
         "action": act,
+        "target_mode": tm,
+        "min_edge_bps": float(min_edge_bps),
+        "task": "classification",
         "metrics": asdict(metrics),
         "extra_metrics": extra_metrics,
         "recommended_min_proba": best_thr,
@@ -486,6 +625,18 @@ def main() -> None:
         default=30,
         help="Minimum examples required for BOTH classes (pos/neg) to train (avoid fitting noise).",
     )
+    ap.add_argument(
+        "--target-mode",
+        default="binary",
+        choices=["binary", "beat_fee_bps", "regression_r", "regression_return_pct"],
+        help="Label/target for supervised training.",
+    )
+    ap.add_argument(
+        "--min-edge-bps",
+        type=float,
+        default=10.0,
+        help="For beat_fee_bps: require PnL / return above this many basis points (friction proxy).",
+    )
     args = ap.parse_args()
 
     meta = train_and_save(
@@ -496,6 +647,8 @@ def main() -> None:
         action=str(args.action),
         min_class_count=int(args.min_class_count),
         dataset_source=str(args.dataset),
+        target_mode=str(args.target_mode),
+        min_edge_bps=float(args.min_edge_bps),
     )
     print(json.dumps(meta, indent=2))
 

@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from alpaca_day_bot.ml.targets import signal_binary_from_tb_or_return
+
 
 @dataclass(frozen=True)
 class DatasetResult:
@@ -170,6 +172,8 @@ def build_signal_label_dataset(
     min_horizon_minutes: float | None = None,
     actions: tuple[str, ...] = ("BUY",),
     limit: int | None = None,
+    target_mode: str = "binary",
+    min_edge_bps: float = 10.0,
 ) -> DatasetResult:
     """
     Build supervised dataset from:
@@ -206,8 +210,12 @@ def build_signal_label_dataset(
     rows = conn.execute(sql, params).fetchall()
     conn.close()
 
+    tm = (target_mode or "binary").strip().lower()
+    if tm not in ("binary", "beat_fee_bps", "regression_return_pct", "regression_r"):
+        tm = "binary"
+
     feats_rows: list[dict[str, Any]] = []
-    y_rows: list[int] = []
+    y_rows: list[float | int] = []
     meta_rows: list[dict[str, Any]] = []
 
     for (_sid, ts_s, sym, action, reason, feat_json, ret_pct, horizon_min, tb_outcome) in rows:
@@ -278,11 +286,30 @@ def build_signal_label_dataset(
 
         # Target
         ret = float(ret_pct) if ret_pct is not None else 0.0
-        # Meta-label: 1 iff barrier outcome reached TP; else 0. If no outcome, fallback to sign.
-        if isinstance(tb_outcome, str) and tb_outcome.strip().lower() in ("tp", "sl", "timeout"):
-            y = 1 if tb_outcome.strip().lower() == "tp" else 0
+        tb_out_s = tb_outcome if isinstance(tb_outcome, str) else None
+        if tm == "regression_return_pct":
+            y = float(ret)
+        elif tm == "regression_r":
+            # Signals lack executed PnL; approximate "R" as return% divided by a simple vol proxy.
+            close_v = _to_float(feat.get("close"))
+            atr_v = _to_float(feat.get("atr"))
+            risk_pct = (2.0 * atr_v / close_v * 100.0) if (math.isfinite(close_v) and close_v > 0 and atr_v > 0) else 0.5
+            risk_pct = max(risk_pct, 0.05)
+            y = float(ret) / float(risk_pct)
+        elif tm == "beat_fee_bps":
+            y = signal_binary_from_tb_or_return(
+                tb_outcome=tb_out_s,
+                return_pct=ret,
+                min_edge_bps=float(min_edge_bps),
+                beat_fee=True,
+            )
         else:
-            y = 1 if ret > 0 else 0
+            y = signal_binary_from_tb_or_return(
+                tb_outcome=tb_out_s,
+                return_pct=ret,
+                min_edge_bps=None,
+                beat_fee=False,
+            )
 
         feats_rows.append(x)
         y_rows.append(y)
@@ -299,7 +326,8 @@ def build_signal_label_dataset(
         )
 
     X = pd.DataFrame(feats_rows)
-    y_ser = pd.Series(y_rows, name="y", dtype=int)
+    y_dtype = float if tm.startswith("regression") else int
+    y_ser = pd.Series(y_rows, name="y", dtype=y_dtype)
     meta = pd.DataFrame(meta_rows)
     return DatasetResult(X=X, y=y_ser, meta=meta)
 

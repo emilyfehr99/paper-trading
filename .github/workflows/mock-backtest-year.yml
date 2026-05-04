@@ -370,9 +370,14 @@ jobs:
           PY
 
       - name: Train sim models (BUY + SHORT)
+        env:
+          ML_TARGET_MODE: ${{ vars.ML_TARGET_MODE }}
+          ML_MIN_EDGE_BPS: ${{ vars.ML_MIN_EDGE_BPS }}
         run: |
           set -euo pipefail
-          python3 tools/train_models_from_sim.py --db "${SIM_DB}"
+          python3 tools/train_models_from_sim.py --db "${SIM_DB}" \
+            --target-mode "${ML_TARGET_MODE:-binary}" \
+            --min-edge-bps "${ML_MIN_EDGE_BPS:-10}"
 
       - name: Upload sim dataset + models + reports
         if: always()

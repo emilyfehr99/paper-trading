@@ -242,6 +242,9 @@ jobs:
 
       - name: Train/update ML model (from latest labels)
         if: always()
+        env:
+          ML_TARGET_MODE: ${{ vars.ML_TARGET_MODE }}
+          ML_MIN_EDGE_BPS: ${{ vars.ML_MIN_EDGE_BPS }}
         run: |
           python -m alpaca_day_bot.ml.train \
             --db ${{ steps.traindb.outputs.db }} \
@@ -249,7 +252,9 @@ jobs:
             --action BUY \
             --min-horizon-minutes 15 \
             --min-rows 300 \
-            --min-class-count 50
+            --min-class-count 50 \
+            --target-mode "${ML_TARGET_MODE:-binary}" \
+            --min-edge-bps "${ML_MIN_EDGE_BPS:-10}"
 
           python -m alpaca_day_bot.ml.train \
             --db ${{ steps.traindb.outputs.db }} \
@@ -257,7 +262,9 @@ jobs:
             --action SHORT \
             --min-horizon-minutes 15 \
             --min-rows 300 \
-            --min-class-count 50
+            --min-class-count 50 \
+            --target-mode "${ML_TARGET_MODE:-binary}" \
+            --min-edge-bps "${ML_MIN_EDGE_BPS:-10}"
 
       - name: Update rolling ledger datasets (monthly + all-time)
         if: always()

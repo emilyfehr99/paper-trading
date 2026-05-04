@@ -690,7 +690,13 @@ def _run_in_window_trading_cycle(
             pass
 
     # Model-based early exit: re-score open positions and close when confidence degrades.
-    if bool(getattr(settings, "model_exit_enabled", False)) and ml_bundle is not None:
+    _exit_meta = (ml_bundle.get("meta") if isinstance(ml_bundle, dict) else None) or {}
+    _skip_model_exit_for_regression = isinstance(_exit_meta, dict) and str(_exit_meta.get("task") or "").lower() == "regression"
+    if (
+        bool(getattr(settings, "model_exit_enabled", False))
+        and ml_bundle is not None
+        and not _skip_model_exit_for_regression
+    ):
         try:
             tz = settings.tzinfo()
             intents = ledger.last_submitted_entry_intents_for_trading_date(market_day, tz)
@@ -1415,7 +1421,30 @@ def _run_in_window_trading_cycle(
                 model_bundle=ml_for_action,
                 features={**feat, "action": action, "signal_action": action, "is_buy": 1.0 if action == "BUY" else 0.0},
             )
-            feat["model"] = {"ok": md.ok, "provider": md.provider, "proba": md.proba, "error": md.error}
+            feat["model"] = {
+                "ok": md.ok,
+                "provider": md.provider,
+                "proba": md.proba,
+                "task": getattr(md, "task", "classification"),
+                "regression_pred": getattr(md, "regression_pred", None),
+                "error": md.error,
+            }
+            if md.ok and str(getattr(md, "task", "classification")).lower() == "regression" and md.regression_pred is not None:
+                feat["model_regression_pred"] = float(md.regression_pred)
+                candidates_for_ml.append(
+                    {
+                        "symbol": sym,
+                        "action": action,
+                        "reason": reason,
+                        "features": feat,
+                        "df_1m": df_1m,
+                        "df_15m": df_15m,
+                        "model_proba": None,
+                        "model_regression_pred": float(md.regression_pred),
+                    }
+                )
+                ledger.record_signal(ts=t0, symbol=sig.symbol, action=action, reason=reason, features=feat)
+                continue
             if md.ok and md.proba is not None:
                 feat["model_proba"] = float(md.proba)
                 candidates_for_ml.append(
@@ -1438,6 +1467,8 @@ def _run_in_window_trading_cycle(
         _try_submit_entry(sym=sym, action=action, feat=feat, df_1m=df_1m)
 
     if (ml_bundle_buy is not None or ml_bundle_short is not None) and candidates_for_ml:
+        ml_meta_buy = (ml_bundle_buy or {}).get("meta") if isinstance(ml_bundle_buy, dict) else None
+        ml_meta_short = (ml_bundle_short or {}).get("meta") if isinstance(ml_bundle_short, dict) else None
         _apply_ml_filter_rank_and_trade(
             settings=settings,
             observe_only=observe_only,
@@ -1453,6 +1484,8 @@ def _run_in_window_trading_cycle(
             open_positions=open_positions,
             candidates=candidates_for_ml,
             submit_entry=_try_submit_entry,
+            ml_meta_buy=ml_meta_buy if isinstance(ml_meta_buy, dict) else None,
+            ml_meta_short=ml_meta_short if isinstance(ml_meta_short, dict) else None,
         )
 
     _label_signals_forward_returns(
@@ -1472,6 +1505,33 @@ def _run_in_window_trading_cycle(
     return last_signal_scan_ts
 
 
+def _regime_min_proba_from_map(
+    reg_map: dict,
+    rlbl: str | None,
+    act: str,
+    *,
+    min_p_long: float,
+    min_p_short: float,
+) -> float:
+    """Prefer `regime|BUY` / `regime|SHORT` keys, then plain `regime`, then global long/short defaults."""
+    act_u = (act or "").strip().upper()
+    base = float(min_p_short if act_u == "SHORT" else min_p_long)
+    if not rlbl or not isinstance(reg_map, dict):
+        return base
+    r = str(rlbl).strip()
+    if not r:
+        return base
+    k = f"{r}|{act_u}"
+    try:
+        if k in reg_map:
+            return float(reg_map[k])
+        if r in reg_map:
+            return float(reg_map[r])
+    except Exception:
+        pass
+    return base
+
+
 def _apply_ml_filter_rank_and_trade(
     *,
     settings,
@@ -1488,9 +1548,11 @@ def _apply_ml_filter_rank_and_trade(
     open_positions: int,
     candidates: list[dict],
     submit_entry,
+    ml_meta_buy: dict | None = None,
+    ml_meta_short: dict | None = None,
 ) -> None:
     """
-    Take pre-scored candidates, filter by MODEL_MIN_PROBA and submit top-N.
+    Take pre-scored candidates, filter by MODEL_MIN_PROBA (classification) or regression edge, then submit top-N.
     """
     if not candidates:
         return
@@ -1530,23 +1592,58 @@ def _apply_ml_filter_rank_and_trade(
     top_n = max(1, int(getattr(settings, "top_n_per_tick", 2)))
     keep = []
     for c in candidates:
-        mp = float(c.get("model_proba", 0.0))
         act = str(c.get("action") or "").strip().upper()
+        meta_side = ml_meta_short if act == "SHORT" else ml_meta_buy
+        task = str((meta_side or {}).get("task") or "classification").strip().lower()
         feat = c.get("features") or {}
         rlbl = None
         try:
             rlbl = (feat.get("regime") if isinstance(feat, dict) else None) or None
         except Exception:
             rlbl = None
-        mp_req = (min_p_short if act == "SHORT" else min_p_long)
+        if task == "regression":
+            raw = c.get("model_regression_pred")
+            if raw is None:
+                continue
+            try:
+                pv = float(raw)
+            except Exception:
+                continue
+            try:
+                art = (meta_side or {}).get("recommended_regression_min")
+                reg_min = float(art) if art is not None and str(art).lower() != "nan" else float("-inf")
+            except Exception:
+                reg_min = float("-inf")
+            try:
+                env_min = float(getattr(settings, "model_regression_min_pred", 0.0) or 0.0)
+            except Exception:
+                env_min = 0.0
+            thr = max(reg_min, env_min)
+            if pv >= thr:
+                keep.append(c)
+            continue
         try:
-            if rlbl and isinstance(reg_map, dict) and rlbl in reg_map:
-                mp_req = float(reg_map[rlbl])
+            mp = float(c.get("model_proba", 0.0))
         except Exception:
-            mp_req = (min_p_short if act == "SHORT" else min_p_long)
+            mp = 0.0
+        mp_req = _regime_min_proba_from_map(reg_map, rlbl, act, min_p_long=min_p_long, min_p_short=min_p_short)
         if mp >= mp_req:
             keep.append(c)
-    keep.sort(key=lambda c: (-float(c.get("model_proba", 0.0)), str(c.get("symbol", ""))))
+
+    def _ml_sort_key(cc: dict) -> tuple:
+        act_u = str(cc.get("action") or "").strip().upper()
+        ms = ml_meta_short if act_u == "SHORT" else ml_meta_buy
+        if isinstance(ms, dict) and str(ms.get("task") or "").strip().lower() == "regression":
+            try:
+                return (-float(cc.get("model_regression_pred")), str(cc.get("symbol", "")))
+            except Exception:
+                return (1e18, str(cc.get("symbol", "")))
+        try:
+            return (-float(cc.get("model_proba", 0.0)), str(cc.get("symbol", "")))
+        except Exception:
+            return (0.0, str(cc.get("symbol", "")))
+
+    keep.sort(key=_ml_sort_key)
     keep = keep[:top_n]
 
     for c in keep:

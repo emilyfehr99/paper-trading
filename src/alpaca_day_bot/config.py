@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     model_path_long: str = Field(default="state/models/latest_buy.joblib", alias="MODEL_PATH_LONG")
     model_path_short: str = Field(default="state/models/latest_short.joblib", alias="MODEL_PATH_SHORT")
     model_path: str = Field(default="state/models/latest.joblib", alias="MODEL_PATH")
+    # Training label / target: binary | beat_fee_bps | regression_r | regression_return_pct
+    ml_target_mode: str = Field(default="binary", alias="ML_TARGET_MODE")
+    ml_min_edge_bps: float = Field(default=10.0, alias="ML_MIN_EDGE_BPS")
+    # Floor for regression-gated entries (max with artifact recommended_regression_min).
+    model_regression_min_pred: float = Field(default=0.0, alias="MODEL_REGRESSION_MIN_PRED")
 
     # Exits (bracket-like)
     stop_loss_atr_mult: float = Field(default=1.5, alias="STOP_LOSS_ATR_MULT")

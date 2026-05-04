@@ -16,14 +16,20 @@ def _md_block(title: str, payload: dict) -> str:
         lines.append(f"- **n_labeled**: {payload.get('n_labeled')}")
     else:
         m = payload.get("metrics") or {}
+        lines.append(f"- **task**: `{payload.get('task', 'classification')}`")
+        lines.append(f"- **target_mode**: `{payload.get('target_mode', 'binary')}`")
         lines.append(f"- **provider**: `{payload.get('provider')}`")
         lines.append(f"- **dataset_kind**: `{payload.get('dataset_kind')}`")
         lines.append(f"- **rows_seen**: {payload.get('rows_seen')}")
         lines.append(f"- **test_n**: {m.get('n')}")
-        lines.append(f"- **test_auc**: {m.get('auc')}")
-        lines.append(f"- **test_acc**: {m.get('acc')}")
-        lines.append(f"- **test_pos_rate**: {m.get('pos_rate')}")
-        lines.append(f"- **recommended_min_proba**: {payload.get('recommended_min_proba')}")
+        if str(payload.get("task") or "").lower() == "regression":
+            lines.append(f"- **test_rmse**: {m.get('rmse')}")
+            lines.append(f"- **recommended_regression_min**: {payload.get('recommended_regression_min')}")
+        else:
+            lines.append(f"- **test_auc**: {m.get('auc')}")
+            lines.append(f"- **test_acc**: {m.get('acc')}")
+            lines.append(f"- **test_pos_rate**: {m.get('pos_rate')}")
+            lines.append(f"- **recommended_min_proba**: {payload.get('recommended_min_proba')}")
     lines.append("")
     return "\n".join(lines)
 
@@ -36,6 +42,12 @@ def main() -> None:
     ap.add_argument("--min-rows", type=int, default=300)
     ap.add_argument("--min-class-count", type=int, default=50)
     ap.add_argument("--min-horizon-minutes", type=float, default=15.0)
+    ap.add_argument(
+        "--target-mode",
+        default="binary",
+        choices=["binary", "beat_fee_bps", "regression_r", "regression_return_pct"],
+    )
+    ap.add_argument("--min-edge-bps", type=float, default=10.0)
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -54,6 +66,8 @@ def main() -> None:
         action="BUY",
         min_class_count=int(args.min_class_count),
         dataset_source="sim",
+        target_mode=str(args.target_mode),
+        min_edge_bps=float(args.min_edge_bps),
     )
     short_meta = train_and_save(
         db_path=str(args.db),
@@ -63,6 +77,8 @@ def main() -> None:
         action="SHORT",
         min_class_count=int(args.min_class_count),
         dataset_source="sim",
+        target_mode=str(args.target_mode),
+        min_edge_bps=float(args.min_edge_bps),
     )
 
     # Persist JSON sidecars for easy inspection.

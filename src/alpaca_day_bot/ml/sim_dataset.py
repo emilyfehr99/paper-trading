@@ -8,15 +8,27 @@ from typing import Any
 import pandas as pd
 
 from alpaca_day_bot.ml.dataset import DatasetResult, _news_features, _parse_iso_dt, _taapi_features, _to_float
+from alpaca_day_bot.ml.targets import (
+    beat_fee_binary,
+    binary_win,
+    regression_return_pct_from_trade,
+    regression_r_multiple,
+)
 
 
-def build_sim_trade_dataset(*, db_path: str, actions: tuple[str, ...] = ("BUY",), limit: int | None = None) -> DatasetResult:
+def build_sim_trade_dataset(
+    *,
+    db_path: str,
+    actions: tuple[str, ...] = ("BUY",),
+    limit: int | None = None,
+    target_mode: str = "binary",
+    min_edge_bps: float = 10.0,
+) -> DatasetResult:
     """
     Build a supervised dataset from simulated trades:
       sim_signals JOIN sim_trades ON sim_trades.sim_signal_id = sim_signals.id
 
-    Label:
-      y=1 iff trade pnl > 0 else 0
+    Label: binary / beat_fee_bps / regression targets (see ml.targets).
     """
     conn = sqlite3.connect(db_path)
     sql = """
@@ -43,8 +55,12 @@ def build_sim_trade_dataset(*, db_path: str, actions: tuple[str, ...] = ("BUY",)
     rows = conn.execute(sql, params).fetchall()
     conn.close()
 
+    tm = (target_mode or "binary").strip().lower()
+    if tm not in ("binary", "beat_fee_bps", "regression_return_pct", "regression_r"):
+        tm = "binary"
+
     feats_rows: list[dict[str, Any]] = []
-    y_rows: list[int] = []
+    y_rows: list[float | int] = []
     meta_rows: list[dict[str, Any]] = []
 
     for (_sid, ts_s, sym, action, reason, feat_json, pnl, entry_price, qty, hold_minutes) in rows:
@@ -115,7 +131,23 @@ def build_sim_trade_dataset(*, db_path: str, actions: tuple[str, ...] = ("BUY",)
             pnl_v = 0.0
             ret_pct = 0.0
 
-        y = 1 if pnl_v > 0 else 0
+        notional_abs = abs(float(notional))
+        dir_u = "long" if str(action).upper() == "BUY" else "short"
+        if tm == "regression_return_pct":
+            y = regression_return_pct_from_trade(pnl_v, notional_abs)
+        elif tm == "regression_r":
+            y = regression_r_multiple(
+                pnl_v,
+                feat,
+                entry_px=float(entry_price or 0.0),
+                qty=float(qty or 0.0),
+                direction=dir_u,
+            )
+        elif tm == "beat_fee_bps":
+            y = beat_fee_binary(pnl=pnl_v, notional_abs=notional_abs, min_edge_bps=float(min_edge_bps))
+        else:
+            y = binary_win(pnl_v)
+
         feats_rows.append(x)
         y_rows.append(y)
         meta_rows.append(
@@ -131,7 +163,8 @@ def build_sim_trade_dataset(*, db_path: str, actions: tuple[str, ...] = ("BUY",)
         )
 
     X = pd.DataFrame(feats_rows)
-    y_ser = pd.Series(y_rows, name="y", dtype=int)
+    y_dtype = float if tm.startswith("regression") else int
+    y_ser = pd.Series(y_rows, name="y", dtype=y_dtype)
     meta = pd.DataFrame(meta_rows)
     return DatasetResult(X=X, y=y_ser, meta=meta)
 

@@ -15,6 +15,8 @@ class ModelDecision:
     provider: str | None
     proba: float | None
     error: str | None = None
+    task: str = "classification"
+    regression_pred: float | None = None
 
 
 def _flatten_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
@@ -215,6 +217,7 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
         model = model_bundle.get("model")
         meta = model_bundle.get("meta") or {}
         provider = str(meta.get("provider")) if isinstance(meta, dict) else None
+        task = str(meta.get("task") or "classification").strip().lower()
         cols = meta.get("feature_columns") if isinstance(meta, dict) else None
         x = _flatten_feature_dict(features)
         X = pd.DataFrame([x])
@@ -224,8 +227,25 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
                 if c not in X.columns:
                     X[c] = float("nan")
             X = X[cols]
+        if task == "regression":
+            pred = float(model.predict(X)[0])
+            return ModelDecision(
+                ok=True,
+                provider=provider,
+                proba=None,
+                error=None,
+                task="regression",
+                regression_pred=pred,
+            )
         p = float(model.predict_proba(X)[:, 1][0])
-        return ModelDecision(ok=True, provider=provider, proba=p, error=None)
+        return ModelDecision(ok=True, provider=provider, proba=p, error=None, task="classification", regression_pred=None)
     except Exception as e:
-        return ModelDecision(ok=False, provider=None, proba=None, error=str(e)[:200])
+        return ModelDecision(
+            ok=False,
+            provider=None,
+            proba=None,
+            error=str(e)[:200],
+            task="classification",
+            regression_pred=None,
+        )
 

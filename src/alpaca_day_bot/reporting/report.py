@@ -139,25 +139,45 @@ def write_daily_report(
                     ap_s = "n/a" if ex.get("average_precision") is None else f"{float(ex.get('average_precision')):.3f}"
                 except Exception:
                     ap_s = "n/a"
+                try:
+                    rmse_s = "n/a" if m.get("rmse") is None else f"{float(m.get('rmse')):.4f}"
+                except Exception:
+                    rmse_s = "n/a"
+                task_s = str(j.get("task") or "classification").strip().lower()
+                tgt = j.get("target_mode", "n/a")
                 model_train_lines = [
                     "",
                     "### Model training (latest)",
                     f"- **Trained at (UTC)**: {j.get('trained_at', 'n/a')}",
                     f"- **Dataset kind**: {j.get('dataset_kind', 'n/a')}",
+                    f"- **Task**: {task_s}",
+                    f"- **Target mode**: {tgt}",
                     f"- **Provider**: {j.get('provider', 'n/a')}",
                     f"- **Rows seen**: {j.get('rows_seen', 'n/a')}",
                     f"- **Test n**: {m.get('n', 'n/a')}",
-                    f"- **Test pos rate**: {pos_rate_s}",
-                    f"- **Test AUC**: {auc_s}",
-                    f"- **Test average precision (PR-AUC)**: {ap_s}",
-                    f"- **Test accuracy**: {acc_s}",
-                    f"- **Recommended min proba**: {j.get('recommended_min_proba', 'n/a')}"
-                    + (
-                        f" (picked by {j.get('recommended_threshold_metric')})"
-                        if j.get("recommended_threshold_metric")
-                        else ""
-                    ),
                 ]
+                if task_s == "regression":
+                    model_train_lines.extend(
+                        [
+                            f"- **Test RMSE**: {rmse_s}",
+                            f"- **Recommended regression min (pred)**: {j.get('recommended_regression_min', 'n/a')}",
+                        ]
+                    )
+                else:
+                    model_train_lines.extend(
+                        [
+                            f"- **Test pos rate**: {pos_rate_s}",
+                            f"- **Test AUC**: {auc_s}",
+                            f"- **Test average precision (PR-AUC)**: {ap_s}",
+                            f"- **Test accuracy**: {acc_s}",
+                            f"- **Recommended min proba**: {j.get('recommended_min_proba', 'n/a')}"
+                            + (
+                                f" (picked by {j.get('recommended_threshold_metric')})"
+                                if j.get("recommended_threshold_metric")
+                                else ""
+                            ),
+                        ]
+                    )
             elif isinstance(j, dict) and bool(j.get("skipped")):
                 model_train_lines = [
                     "",
@@ -305,11 +325,14 @@ def _regime_threshold_lines(db_path: str) -> list[str]:
         return ["- n/a"]
     if not rows:
         return ["- Not enough labeled rows yet."]
-    out = [f"- **Default**: 0.55", f"- **Regimes learned**: {len(mp_map)}"]
-    for r in rows[:12]:
+    out = [f"- **Default**: 0.55", f"- **Regime×action keys learned**: {len(mp_map)}"]
+    for r in rows[:16]:
         thr = "n/a" if r.best_min_proba is None else f"{r.best_min_proba:.2f}"
         hr = "n/a" if r.hit_rate is None else f"{r.hit_rate*100:.1f}%"
-        out.append(f"- **{r.regime}**: n={r.n}, thr={thr}, hit={hr}")
+        f1s = "n/a" if getattr(r, "metric_f1", None) is None else f"{float(r.metric_f1):.3f}"
+        act = getattr(r, "action", "") or ""
+        label = f"{r.regime}|{act}" if act else str(r.regime)
+        out.append(f"- **{label}**: n={r.n}, thr={thr}, test_f1={f1s}, hit@thr={hr}")
     return out
 
 def _trade_why_lines(db_path: str, day: date) -> list[str]:

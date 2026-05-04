@@ -8,8 +8,14 @@ from typing import Any
 
 import pandas as pd
 
-from alpaca_day_bot.reporting.trades import Fill, _rows_to_fills, reconstruct_round_trips
+from alpaca_day_bot.reporting.trades import _rows_to_fills, reconstruct_round_trips
 from alpaca_day_bot.ml.infer import _flatten_feature_dict
+from alpaca_day_bot.ml.targets import (
+    beat_fee_binary,
+    binary_win,
+    regression_return_pct_from_trade,
+    regression_r_multiple,
+)
 
 
 @dataclass(frozen=True)
@@ -87,10 +93,12 @@ def build_executed_trade_dataset(
     max_signal_age_minutes: float = 30.0,
     min_trades: int = 5,
     direction: str | None = None,  # long | short | None
+    target_mode: str = "binary",
+    min_edge_bps: float = 10.0,
 ) -> ExecutedDatasetResult | None:
     """
     Build dataset from EXECUTED fills:
-      trade_updates -> fills -> FIFO round trips -> label by PnL sign
+      trade_updates -> fills -> FIFO round trips -> label (binary / fee-aware / regression)
     Then attach features from the most recent signal before the entry timestamp.
     """
     conn = sqlite3.connect(db_path)
@@ -111,8 +119,12 @@ def build_executed_trade_dataset(
     signals = _load_signals(conn)
     conn.close()
 
+    tm = (target_mode or "binary").strip().lower()
+    if tm not in ("binary", "beat_fee_bps", "regression_return_pct", "regression_r"):
+        tm = "binary"
+
     X_rows: list[dict[str, Any]] = []
-    y_rows: list[int] = []
+    y_rows: list[float | int] = []
     meta_rows: list[dict[str, Any]] = []
 
     want_dir = (direction or "").strip().lower() or None
@@ -134,8 +146,25 @@ def build_executed_trade_dataset(
         x["exec_entry_px"] = float(rt.entry_px)
         x["exec_exit_px"] = float(rt.exit_px)
 
+        pnl_v = float(rt.pnl)
+        notional = abs(float(rt.entry_px) * float(rt.qty))
+        if tm == "regression_return_pct":
+            yv = regression_return_pct_from_trade(pnl_v, notional)
+        elif tm == "regression_r":
+            yv = regression_r_multiple(
+                pnl_v,
+                feat,
+                entry_px=float(rt.entry_px),
+                qty=float(rt.qty),
+                direction=str(rt.direction).strip().lower(),
+            )
+        elif tm == "beat_fee_bps":
+            yv = beat_fee_binary(pnl=pnl_v, notional_abs=notional, min_edge_bps=float(min_edge_bps))
+        else:
+            yv = binary_win(pnl_v)
+
         X_rows.append(x)
-        y_rows.append(1 if float(rt.pnl) > 0 else 0)
+        y_rows.append(yv)
         meta_rows.append(
             {
                 # Align with signal/sim meta so train_and_save() time-purge uses entry time.
@@ -147,7 +176,7 @@ def build_executed_trade_dataset(
                 "qty": float(rt.qty),
                 "entry_px": float(rt.entry_px),
                 "exit_px": float(rt.exit_px),
-                "pnl": float(rt.pnl),
+                "pnl": pnl_v,
             }
         )
 
@@ -155,7 +184,8 @@ def build_executed_trade_dataset(
         return None
 
     X = pd.DataFrame(X_rows)
-    y = pd.Series(y_rows, dtype=int, name="y")
+    y_dtype = float if tm.startswith("regression") else int
+    y = pd.Series(y_rows, dtype=y_dtype, name="y")
     meta = pd.DataFrame(meta_rows)
     return ExecutedDatasetResult(X=X, y=y, meta=meta)
 
