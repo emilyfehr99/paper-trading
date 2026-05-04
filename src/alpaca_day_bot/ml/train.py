@@ -13,6 +13,7 @@ from sklearn.dummy import DummyClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -20,6 +21,7 @@ from sklearn.metrics import (
     f1_score,
     mean_squared_error,
     precision_score,
+    recall_score,
     roc_auc_score,
 )
 from sklearn.base import clone
@@ -130,6 +132,14 @@ def _cv_from_y_series(y: pd.Series) -> int:
         return 0
     min_class = min(counts.values()) if counts else 0
     return min(3, int(min_class)) if min_class else 0
+
+
+def _clip_proba_1d(p: np.ndarray) -> np.ndarray:
+    """Match inference bounds: stable Brier / logs and comparable thresholds."""
+    x = np.asarray(p, dtype=float).reshape(-1)
+    x = np.where(np.isfinite(x), x, 0.5)
+    eps = 1e-6
+    return np.clip(x, eps, 1.0 - eps)
 
 
 def _fit_calibrated_pipeline(
@@ -527,6 +537,7 @@ def train_and_save(
     logreg = Pipeline(
         steps=[
             ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
             (
                 "clf",
                 LogisticRegression(
@@ -551,6 +562,7 @@ def train_and_save(
                     max_depth=8,
                     min_samples_leaf=20,
                     max_samples=0.85,
+                    ccp_alpha=1e-4,
                     random_state=42,
                     n_jobs=1,
                     class_weight="balanced_subsample",
@@ -586,20 +598,26 @@ def train_and_save(
     except Exception:
         lgbm_pipe = None
 
+    hgb_params: dict = {
+        "max_depth": 7,
+        "max_iter": 700,
+        "learning_rate": 0.06,
+        "l2_regularization": 1.0,
+        "min_samples_leaf": 20,
+        "random_state": 42,
+    }
+    # Early stopping needs enough rows for internal val split + folds inside calibration CV.
+    if int(len(X_train)) >= 130:
+        hgb_params = {
+            **hgb_params,
+            "early_stopping": True,
+            "validation_fraction": 0.12,
+            "n_iter_no_change": 30,
+        }
     hgb_clf = Pipeline(
         steps=[
             ("impute", SimpleImputer(strategy="median")),
-            (
-                "clf",
-                HistGradientBoostingClassifier(
-                    max_depth=7,
-                    max_iter=350,
-                    learning_rate=0.06,
-                    l2_regularization=1.0,
-                    min_samples_leaf=20,
-                    random_state=42,
-                ),
-            ),
+            ("clf", HistGradientBoostingClassifier(**hgb_params)),
         ]
     )
 
@@ -649,7 +667,7 @@ def train_and_save(
     def eval_model(m, Xev=None, yev=None):
         Xh = X_test if Xev is None else Xev
         yh = y_test if yev is None else yev
-        proba = m.predict_proba(Xh)[:, 1]
+        proba = _clip_proba_1d(m.predict_proba(Xh)[:, 1])
         pred = (proba >= 0.5).astype(int)
         tm = TrainMetrics(
             n=int(len(yh)),
@@ -693,13 +711,17 @@ def train_and_save(
 
     def model_score(m: TrainMetrics, extra: dict) -> float:
         """
-        Prefer a stable blend of ROC-AUC and PR-AUC under imbalance; fall back to accuracy.
+        Blend ROC-AUC, PR-AUC, and (penalized) Brier under imbalance; fall back when pieces missing.
         """
         ap = extra.get("average_precision") if isinstance(extra, dict) else None
-        if m.auc is not None and ap is not None:
-            return 0.62 * float(m.auc) + 0.38 * float(ap)
-        if m.auc is not None:
-            return float(m.auc)
+        br = extra.get("brier") if isinstance(extra, dict) else None
+        auc = m.auc
+        if auc is not None and ap is not None and br is not None and np.isfinite(float(br)):
+            return 0.52 * float(auc) + 0.33 * float(ap) - 0.15 * float(br)
+        if auc is not None and ap is not None:
+            return 0.62 * float(auc) + 0.38 * float(ap)
+        if auc is not None:
+            return float(auc)
         if ap is not None:
             return float(ap)
         return float(m.acc)
@@ -734,23 +756,48 @@ def train_and_save(
             **extra_metrics,
             "calibration_method": str(cal_method),
             "model_selection_inner_val": bool(use_inner),
+            "model_selection_score_blend": "0.52*auc+0.33*ap-0.15*brier_when_all_finite_else_legacy",
+            "hist_gbc_early_stopping": bool(hgb_params.get("early_stopping", False)),
+            "logreg_standard_scaled": True,
         }
 
     # Threshold sweep on TRAIN scores only (avoids optimistic threshold fit on the same test used for AUC).
-    proba_tr = model.predict_proba(X_train)[:, 1]
+    proba_tr = _clip_proba_1d(model.predict_proba(X_train)[:, 1])
     best_thr = 0.55
     best_f1_tr = -1.0
     best_thr_precision_tr = 0.0
-    try:
-        for thr in (0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80):
+    best_thr_recall_tr = -1.0
+    n_tr_thr = int(len(y_train))
+    min_pred_per_class = max(8, int(0.02 * n_tr_thr))
+    thr_grid = (0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80)
+
+    def _threshold_sweep(require_min_support: bool) -> tuple[float, float, float, float]:
+        b_thr, b_f1, b_prec, b_rec = 0.55, -1.0, 0.0, -1.0
+        for thr in thr_grid:
             pred = (proba_tr >= thr).astype(int)
+            if require_min_support:
+                n_pos = int(np.sum(pred))
+                n_neg = int(n_tr_thr - n_pos)
+                if n_pos < min_pred_per_class or n_neg < min_pred_per_class:
+                    continue
             f1_thr = float(f1_score(y_train, pred, zero_division=0))
             prec_thr = float(precision_score(y_train, pred, zero_division=0))
-            if f1_thr > best_f1_tr or (f1_thr == best_f1_tr and prec_thr > best_thr_precision_tr):
-                best_f1_tr = f1_thr
-                best_thr_precision_tr = prec_thr
-                best_thr = float(thr)
+            rec_thr = float(recall_score(y_train, pred, zero_division=0))
+            better = f1_thr > b_f1
+            better |= f1_thr == b_f1 and prec_thr > b_prec
+            better |= f1_thr == b_f1 and prec_thr == b_prec and rec_thr > b_rec
+            if better:
+                b_f1, b_prec, b_rec, b_thr = f1_thr, prec_thr, rec_thr, float(thr)
+        return b_thr, b_f1, b_prec, b_rec
+
+    thr_used_min_sup = True
+    try:
+        best_thr, best_f1_tr, best_thr_precision_tr, best_thr_recall_tr = _threshold_sweep(True)
+        if best_f1_tr < 0.0:
+            thr_used_min_sup = False
+            best_thr, best_f1_tr, best_thr_precision_tr, best_thr_recall_tr = _threshold_sweep(False)
     except Exception:
+        thr_used_min_sup = False
         pass
     try:
         f1_te_applied = float(f1_score(y_test, (proba_best >= float(best_thr)).astype(int), zero_division=0))
@@ -760,7 +807,11 @@ def train_and_save(
         extra_metrics = {
             **extra_metrics,
             "recommended_threshold_f1_train_select": float(best_f1_tr),
+            "recommended_threshold_precision_train_select": float(best_thr_precision_tr),
+            "recommended_threshold_recall_train_select": float(best_thr_recall_tr),
             "recommended_threshold_f1_test_applied": float(f1_te_applied),
+            "threshold_min_pred_per_class": int(min_pred_per_class),
+            "threshold_min_support_constraint_applied": bool(thr_used_min_sup),
         }
 
     # Save simple explainability artifacts
