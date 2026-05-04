@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import sleep
 
 import pandas as pd
 
@@ -40,6 +41,7 @@ def fetch_equity_minute_bars(
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
+    from alpaca.common.exceptions import APIError
 
     s0 = _norm_utc(start)
     e0 = _norm_utc(end)
@@ -88,7 +90,27 @@ def fetch_equity_minute_bars(
             limit=10000,
             feed=DataFeed.IEX,
         )
-        bars = client.get_stock_bars(req)
+        bars = None
+        last_err: Exception | None = None
+        for attempt in range(6):
+            try:
+                bars = client.get_stock_bars(req)
+                last_err = None
+                break
+            except APIError as e:
+                last_err = e
+                # Alpaca responds with "too many requests" on 429; backoff and retry.
+                msg = str(e).lower()
+                if "too many requests" in msg or "429" in msg:
+                    sleep(min(30.0, 1.5**attempt))
+                    continue
+                raise
+            except Exception as e:
+                last_err = e
+                # transient network / 5xx style; retry a bit
+                sleep(min(15.0, 1.5**attempt))
+        if bars is None and last_err is not None:
+            raise last_err
         df = getattr(bars, "df", None)
         if df is None or getattr(df, "empty", True):
             t = t2
