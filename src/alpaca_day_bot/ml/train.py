@@ -17,6 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
+    balanced_accuracy_score,
     brier_score_loss,
     f1_score,
     mean_squared_error,
@@ -152,7 +153,19 @@ def _fit_calibrated_pipeline(
 ) -> Pipeline | CalibratedClassifierCV:
     p = clone(pipe)
     if cv_n >= 2:
-        cal = CalibratedClassifierCV(p, method=str(cal_method), cv=int(cv_n))
+        try:
+            n_fit = int(len(X))
+        except Exception:
+            n_fit = 0
+        # Fewer disjoint calibrators when n is modest — less variance than a large ensemble.
+        cal_ensemble: bool | str = False if n_fit < 380 else "auto"
+        cal = CalibratedClassifierCV(
+            p,
+            method=str(cal_method),
+            cv=int(cv_n),
+            ensemble=cal_ensemble,
+            n_jobs=1,
+        )
         cal.fit(X, y)
         return cal
     p.fit(X, y)
@@ -395,13 +408,21 @@ def train_and_save(
     if is_regression:
         y_train_f = pd.to_numeric(y_train, errors="coerce").astype(float)
         y_test_f = pd.to_numeric(y_test, errors="coerce").astype(float)
-        reg = HistGradientBoostingRegressor(
-            max_depth=10,
-            max_iter=500,
-            learning_rate=0.05,
-            l2_regularization=1.0,
-            random_state=42,
-        )
+        reg_kw: dict = {
+            "max_depth": 10,
+            "max_iter": 750,
+            "learning_rate": 0.05,
+            "l2_regularization": 1.0,
+            "random_state": 42,
+        }
+        if int(len(X_train)) >= 120:
+            reg_kw = {
+                **reg_kw,
+                "early_stopping": True,
+                "validation_fraction": 0.12,
+                "n_iter_no_change": 35,
+            }
+        reg = HistGradientBoostingRegressor(**reg_kw)
         reg.fit(X_train, y_train_f)
         pred_te = reg.predict(X_test)
         rmse = float(np.sqrt(mean_squared_error(y_test_f, pred_te))) if len(y_test_f) else float("nan")
@@ -459,6 +480,7 @@ def train_and_save(
                 "gate_f1_positive_return_train_select": float(best_f1_gate),
                 "gate_precision_positive_return_train_select": float(best_prec_gate),
                 "gate_f1_positive_return_test_applied": float(f1_test_at_thr),
+                "hist_gbr_early_stopping": bool(reg_kw.get("early_stopping", False)),
             },
             "recommended_regression_min": float(best_thr),
             "recommended_min_proba": None,
@@ -586,10 +608,13 @@ def train_and_save(
                         num_leaves=31,
                         subsample=0.9,
                         colsample_bytree=0.9,
+                        colsample_bynode=0.78,
                         random_state=42,
                         class_weight="balanced",
-                        min_child_samples=40,
+                        min_child_samples=44,
                         reg_alpha=0.1,
+                        reg_lambda=0.15,
+                        extra_trees=True,
                         min_gain_to_split=0.02,
                     ),
                 ),
@@ -696,9 +721,18 @@ def train_and_save(
         except Exception:
             cal = {}
         ap = _safe_average_precision(yh, proba)
+        bac = None
+        try:
+            y_arr = np.asarray(yh, dtype=int)
+            if len(np.unique(y_arr)) >= 2:
+                bac = float(balanced_accuracy_score(y_arr, pred))
+        except Exception:
+            bac = None
         extra = {
             "average_precision": ap,
+            "balanced_accuracy_at_0p5": bac,
             "precision_at_10pct": _precision_at_k(yh, proba, 0.10),
+            "precision_at_15pct": _precision_at_k(yh, proba, 0.15),
             "precision_at_20pct": _precision_at_k(yh, proba, 0.20),
             "precision_at_30pct": _precision_at_k(yh, proba, 0.30),
             **cal,
@@ -711,13 +745,17 @@ def train_and_save(
 
     def model_score(m: TrainMetrics, extra: dict) -> float:
         """
-        Blend ROC-AUC, PR-AUC, and (penalized) Brier under imbalance; fall back when pieces missing.
+        Blend ROC-AUC, PR-AUC, Brier, and balanced accuracy at 0.5; fall back when pieces missing.
         """
         ap = extra.get("average_precision") if isinstance(extra, dict) else None
         br = extra.get("brier") if isinstance(extra, dict) else None
+        bac = extra.get("balanced_accuracy_at_0p5") if isinstance(extra, dict) else None
         auc = m.auc
         if auc is not None and ap is not None and br is not None and np.isfinite(float(br)):
-            return 0.52 * float(auc) + 0.33 * float(ap) - 0.15 * float(br)
+            s = 0.49 * float(auc) + 0.30 * float(ap) - 0.13 * float(br)
+            if bac is not None and np.isfinite(float(bac)):
+                s += 0.08 * float(bac)
+            return s
         if auc is not None and ap is not None:
             return 0.62 * float(auc) + 0.38 * float(ap)
         if auc is not None:
@@ -756,7 +794,8 @@ def train_and_save(
             **extra_metrics,
             "calibration_method": str(cal_method),
             "model_selection_inner_val": bool(use_inner),
-            "model_selection_score_blend": "0.52*auc+0.33*ap-0.15*brier_when_all_finite_else_legacy",
+            "model_selection_score_blend": "0.49*auc+0.30*ap-0.13*brier+0.08*balacc_when_all_finite_else_legacy",
+            "calibration_ensemble": "false_lt_380_rows_else_auto",
             "hist_gbc_early_stopping": bool(hgb_params.get("early_stopping", False)),
             "logreg_standard_scaled": True,
         }

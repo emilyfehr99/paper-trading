@@ -229,14 +229,23 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
                     X[c] = float("nan")
             X = X[cols]
         if task == "regression":
-            pred = float(model.predict(X)[0])
+            pred_raw = float(model.predict(X)[0])
+            if not math.isfinite(pred_raw):
+                return ModelDecision(
+                    ok=False,
+                    provider=provider,
+                    proba=None,
+                    error="non_finite_regression_pred",
+                    task="regression",
+                    regression_pred=None,
+                )
             return ModelDecision(
                 ok=True,
                 provider=provider,
                 proba=None,
                 error=None,
                 task="regression",
-                regression_pred=pred,
+                regression_pred=pred_raw,
             )
         p_raw = float(model.predict_proba(X)[:, 1][0])
         if not math.isfinite(p_raw):
