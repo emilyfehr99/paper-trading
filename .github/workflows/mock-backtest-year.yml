@@ -74,10 +74,26 @@ jobs:
           out_dir=Path("state/mock_cache")
           out_dir.mkdir(parents=True, exist_ok=True)
           master_path=str(out_dir/"equity_master_universe.json")
-          master=build_master_universe_assets(api_key, api_secret, out_path=master_path, max_symbols=10000, require_shortable=False)
+          master=build_master_universe_assets(
+            apca_api_key_id=api_key,
+            apca_api_secret_key=api_secret,
+            out_path=master_path,
+            max_symbols=10000,
+            require_shortable=False,
+          )
           candidates=list(master.get("symbols") or [])
           liquid_path=str(out_dir/"equity_liquid_universe.json")
-          uni=build_liquid_universe(api_key, api_secret, out_path=liquid_path, candidate_symbols=candidates, max_symbols=int(os.environ.get("EQUITY_MAX","500")), lookback_days=20, min_price=1.0, max_price=500.0, min_avg_dollar_vol=10_000_000.0)
+          uni=build_liquid_universe(
+            apca_api_key_id=api_key,
+            apca_api_secret_key=api_secret,
+            out_path=liquid_path,
+            candidate_symbols=candidates,
+            max_symbols=int(os.environ.get("EQUITY_MAX","500")),
+            lookback_days=20,
+            min_price=1.0,
+            max_price=500.0,
+            min_avg_dollar_vol=10_000_000.0,
+          )
           syms=list(uni.selected or [])
           Path("equity_symbols.json").write_text(json.dumps(syms), encoding="utf-8")
           print(f"wrote {len(syms)} symbols")
