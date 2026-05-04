@@ -206,12 +206,12 @@ jobs:
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ env.EQUITY_SHARDS }}
         run: |
           set -euo pipefail
           START="${{ github.event.inputs.start || '' }}"
           END="${{ github.event.inputs.end || '' }}"
-          SHARD=${{ matrix.shard }}
-          SHARDS="${EQUITY_SHARDS}"
           EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
           if [ "${{ github.event_name }}" = "schedule" ]; then
             END="$(date -u +%Y-%m-%d)"
@@ -222,8 +222,8 @@ jobs:
           import json, os
           from pathlib import Path
           syms=json.loads(Path("equity_symbols.json").read_text(encoding="utf-8"))
-          shard=int(os.environ["SHARD"])
-          shards=int(os.environ["SHARDS"])
+          shard=int(os.environ.get("SHARD","0"))
+          shards=int(os.environ.get("SHARDS","1"))
           picked=[s for i,s in enumerate(syms) if (i % shards)==shard]
           print(",".join(picked))
           PY
