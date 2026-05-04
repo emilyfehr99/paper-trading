@@ -35,6 +35,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   PYTHON_VERSION: "3.12"
   SIM_DB: "state/ledgers/sim_rollup.sqlite3"
+  EQUITY_SHARDS: "12"
+  SCHEDULE_ROLLING_DAYS: "90"
 
 jobs:
   build_equity_universe:
@@ -116,7 +118,7 @@ jobs:
       - name: Install package
         run: pip install -e .
 
-      - name: Build 1y sim dataset (crypto)
+      - name: Build sim dataset (crypto)
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
@@ -124,6 +126,10 @@ jobs:
           set -euo pipefail
           START="${{ github.event.inputs.start || '' }}"
           END="${{ github.event.inputs.end || '' }}"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            END="$(date -u +%Y-%m-%d)"
+            START="$(date -u -d "${END} -${SCHEDULE_ROLLING_DAYS} days" +%Y-%m-%d)"
+          fi
           OUT_DB="state/ledgers/sim_crypto.sqlite3"
 
           ARGS=(--market "crypto" --sim-db "${OUT_DB}" --report-path "reports/mock_backtest_crypto_latest.md")
@@ -150,7 +156,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@v6
 
@@ -168,7 +174,7 @@ jobs:
         with:
           path: |
             state/mock_cache/equity_1m
-          key: alpaca-mock-backtest-equity-${{ runner.os }}-${{ github.run_id }}-shard-${{ matrix.shard }}
+          key: alpaca-mock-backtest-equity-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             alpaca-mock-backtest-equity-${{ runner.os }}-
 
@@ -180,7 +186,7 @@ jobs:
         with:
           name: equity-symbols-${{ github.run_id }}
 
-      - name: Run 1y sim dataset (equity shard)
+      - name: Run sim dataset (equity shard)
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
@@ -189,8 +195,12 @@ jobs:
           START="${{ github.event.inputs.start || '' }}"
           END="${{ github.event.inputs.end || '' }}"
           SHARD=${{ matrix.shard }}
-          SHARDS=6
+          SHARDS="${EQUITY_SHARDS}"
           EQUITY_MAX="${{ github.event.inputs.equity_max_symbols || '500' }}"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            END="$(date -u +%Y-%m-%d)"
+            START="$(date -u -d "${END} -${SCHEDULE_ROLLING_DAYS} days" +%Y-%m-%d)"
+          fi
 
           python3 - <<'PY' > /tmp/syms.csv
           import json, os
@@ -246,6 +256,14 @@ jobs:
       - name: Install package
         run: pip install -e .
 
+      - name: Restore previous sim_rollup (to accumulate)
+        uses: actions/cache@v5
+        with:
+          path: state/ledgers/sim_rollup.sqlite3
+          key: sim-rollup-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            sim-rollup-${{ runner.os }}-
+
       - name: Download all sim shards
         if: always()
         uses: actions/download-artifact@v6
@@ -258,6 +276,9 @@ jobs:
           mkdir -p state/ledgers reports
           # Merge whatever exists (equity shards and optional crypto shard)
           INPUTS=()
+          if [ -f "${SIM_DB}" ]; then
+            INPUTS+=("${SIM_DB}")
+          fi
           while IFS= read -r -d '' f; do INPUTS+=("$f"); done < <(find state/ledgers/shards -name "*.sqlite3" -print0)
           if [ ${#INPUTS[@]} -eq 0 ]; then
             echo "No shard DBs found; failing."
@@ -268,6 +289,46 @@ jobs:
           if compgen -G "state/ledgers/shards/**/*.md" > /dev/null; then
             cp -f state/ledgers/shards/**/*.md reports/ || true
           fi
+
+      - name: Write sim rollup health report
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sqlite3
+          from pathlib import Path
+          db_path=Path("state/ledgers/sim_rollup.sqlite3")
+          out=Path("reports/sim_rollup_health.md")
+          out.parent.mkdir(parents=True, exist_ok=True)
+          if not db_path.exists():
+            out.write_text("# Sim rollup health\n\n- **error**: sim_rollup.sqlite3 not found\n", encoding="utf-8")
+            raise SystemExit(1)
+          conn=sqlite3.connect(str(db_path))
+          cur=conn.cursor()
+          cur.execute("SELECT COUNT(*) FROM sim_signals"); n_sig=int(cur.fetchone()[0] or 0)
+          cur.execute("SELECT COUNT(*) FROM sim_trades"); n_tr=int(cur.fetchone()[0] or 0)
+          cur.execute("SELECT market, COUNT(*) FROM sim_signals GROUP BY market"); sig_by={m:int(c) for (m,c) in cur.fetchall() or []}
+          cur.execute("SELECT market, COUNT(*) FROM sim_trades GROUP BY market"); tr_by={m:int(c) for (m,c) in cur.fetchall() or []}
+          cur.execute("SELECT market, COALESCE(SUM(pnl),0.0) FROM sim_trades GROUP BY market"); pnl_by={m:float(p) for (m,p) in cur.fetchall() or []}
+          cur.execute("SELECT COALESCE(SUM(pnl),0.0), COALESCE(AVG(pnl),0.0) FROM sim_trades"); pnl_sum, pnl_avg=cur.fetchone() or (0.0, 0.0)
+          conn.close()
+          lines=[]
+          lines.append("# Sim rollup health")
+          lines.append("")
+          lines.append(f"- **sim_db**: `{db_path}`")
+          lines.append("")
+          lines.append("## Totals")
+          lines.append(f"- **sim_signals**: {n_sig}")
+          lines.append(f"- **sim_trades**: {n_tr}")
+          lines.append(f"- **pnl_sum**: {float(pnl_sum):.2f}")
+          lines.append(f"- **pnl_avg**: {float(pnl_avg):.4f}")
+          lines.append("")
+          lines.append("## By market")
+          for mk in sorted(set(sig_by) | set(tr_by) | set(pnl_by)):
+            lines.append(f"- **{mk}**: signals={sig_by.get(mk,0)} trades={tr_by.get(mk,0)} pnl_sum={pnl_by.get(mk,0.0):.2f}")
+          lines.append("")
+          out.write_text("\\n".join(lines), encoding="utf-8")
+          print(out.read_text(encoding="utf-8"))
+          PY
 
       - name: Train sim models (BUY + SHORT)
         run: |
@@ -287,6 +348,7 @@ jobs:
             state/models/latest_short_sim.joblib
             state/models/latest_short_sim.json
             reports/mock_backtest_*.md
+            reports/sim_rollup_health.md
             reports/sim_training_latest.md
           if-no-files-found: warn
 
