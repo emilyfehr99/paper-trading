@@ -342,9 +342,12 @@ class V1RulesSignalEngine(BaseStrategy):
         if atr is None or atr_avg is None:
             atr = float(last.get("atr")) if not pd.isna(last.get("atr")) else None
             atr_avg = float(last.get("atr_avg")) if not pd.isna(last.get("atr_avg")) else None
-        if atr is None or atr_avg is None:
-            return StrategySignal(symbol, "HOLD", "atr_not_ready")
-        if atr_avg > 1e-12 and atr > atr_avg * float(self._atr_regime_max_mult):
+
+        atr_ready = bool(atr is not None and atr_avg is not None)
+        # Fail-open: ATR regime gating is a guardrail, not a hard requirement.
+        # If ATR isn't ready (common early when SIGNAL_TIMEFRAME=15m), skip the regime spike check
+        # rather than blocking all signals.
+        if atr_ready and atr_avg > 1e-12 and atr > atr_avg * float(self._atr_regime_max_mult):
             return StrategySignal(symbol, "HOLD", "atr_regime_spike")
 
         # Regime (approx): allow slightly looser confirmation only in trend + low vol.
@@ -356,7 +359,7 @@ class V1RulesSignalEngine(BaseStrategy):
             adx_v = None
         atr_ratio = None
         try:
-            if atr_avg and atr_avg > 1e-12:
+            if atr_ready and atr_avg and atr_avg > 1e-12:
                 atr_ratio = float(atr) / float(atr_avg)
         except Exception:
             atr_ratio = None
