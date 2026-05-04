@@ -1307,7 +1307,9 @@ def _run_in_window_trading_cycle(
         df_15m = _run_sync(buffer.snapshot_resampled_df(sym, "15min"))
         # Use aggressive mode only in "good" regimes (trend + low vol).
         rlbl0 = _regime_label(df_1m=df_1m, df_15m=df_15m)
-        use_aggr = bool(getattr(settings, "aggressive_mode", False)) and (rlbl0 == "trend_low_vol")
+        use_aggr = (asset_class == "crypto") or (
+            bool(getattr(settings, "aggressive_mode", False)) and (rlbl0 == "trend_low_vol")
+        )
         sig = (strategy_aggr if use_aggr else strategy_cons).decide(symbol=sym, df_1m=df_1m, df_15m=df_15m)
         if sig is None:
             continue
@@ -1781,11 +1783,25 @@ def run(
     #
     # NOTE: Several helper functions reference these by name; bind them at module scope.
     global strategy_cons, strategy_aggr
+
+    asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
+    crypto_preset = asset_class == "crypto"
+    # Crypto needed a looser preset; otherwise most ticks were HOLD (rsi_no_pullback) and no orders were placed.
+    rsi_pb_max = float(settings.rsi_pullback_max)
+    vol_mult = float(settings.volume_confirm_mult)
+    htf_rsi_min = float(settings.htf_rsi_min)
+    atr_regime_max = float(settings.atr_regime_max_mult)
+    if crypto_preset:
+        rsi_pb_max = max(rsi_pb_max, 55.0)
+        vol_mult = min(vol_mult, 1.0)
+        htf_rsi_min = min(htf_rsi_min, 40.0)
+        atr_regime_max = max(atr_regime_max, 3.5)
+
     strategy_cons = V1RulesSignalEngine(
-        rsi_pullback_max=settings.rsi_pullback_max,
-        volume_confirm_mult=settings.volume_confirm_mult,
-        htf_rsi_min=settings.htf_rsi_min,
-        atr_regime_max_mult=settings.atr_regime_max_mult,
+        rsi_pullback_max=rsi_pb_max,
+        volume_confirm_mult=vol_mult,
+        htf_rsi_min=htf_rsi_min,
+        atr_regime_max_mult=atr_regime_max,
         enable_shorts=settings.enable_shorts,
         htf_rsi_max_short=settings.htf_rsi_max_short,
         rsi_rebound_min_short=settings.rsi_rebound_min_short,
@@ -1794,10 +1810,10 @@ def run(
         macd_confirm_mode=getattr(settings, "macd_confirm_mode", "aligned_good_regime_else_cross"),
     )
     strategy_aggr = V1RulesSignalEngine(
-        rsi_pullback_max=settings.rsi_pullback_max,
-        volume_confirm_mult=settings.volume_confirm_mult,
-        htf_rsi_min=settings.htf_rsi_min,
-        atr_regime_max_mult=settings.atr_regime_max_mult,
+        rsi_pullback_max=rsi_pb_max,
+        volume_confirm_mult=vol_mult,
+        htf_rsi_min=htf_rsi_min,
+        atr_regime_max_mult=atr_regime_max,
         enable_shorts=settings.enable_shorts,
         htf_rsi_max_short=settings.htf_rsi_max_short,
         rsi_rebound_min_short=settings.rsi_rebound_min_short,
