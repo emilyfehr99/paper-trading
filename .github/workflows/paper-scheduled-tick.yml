@@ -206,7 +206,10 @@ jobs:
           MAX_SHORT_POSITIONS: "5"
           # Flatten positions before close to avoid overnight holds
           FLATTEN_BEFORE_CLOSE_MINUTES: "5"
-        run: python -m alpaca_day_bot --scheduled-tick
+          # Safety: if you're also running locally against the SAME Alpaca account,
+          # keep Actions in observe-only to avoid double-trading.
+          OBSERVE_ONLY: "true"
+        run: python -m alpaca_day_bot --scheduled-tick --observe-only
 
       - name: Select training DB (rollup if sufficient)
         if: always()

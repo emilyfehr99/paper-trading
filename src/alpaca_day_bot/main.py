@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -18,13 +19,22 @@ from alpaca_day_bot.data.taapi import fetch_taapi_indicators_for_stock
 from alpaca_day_bot.data.tvta import fetch_tvta_indicators_for_stock
 from alpaca_day_bot.data.stream import BarBuffer, MarketDataStreamer
 from alpaca_day_bot.logging_utils import setup_json_logging
-from alpaca_day_bot.ml.infer import load_model as _load_ml_model, predict_proba as _ml_predict_proba
+from alpaca_day_bot.ml.infer import (
+    feature_vector_id_ok,
+    live_inference_path_ok,
+    load_model as _load_ml_model,
+    predict_proba as _ml_predict_proba,
+)
 from alpaca_day_bot.ml.regime_thresholds import learn_regime_min_proba_map, write_regime_thresholds_json
 from alpaca_day_bot.options_sim import close_open_virtual_options
 from alpaca_day_bot.reporting.report import write_daily_report, write_weekly_report
 from alpaca_day_bot.risk.manager import RiskManager, now_utc
 from alpaca_day_bot.storage.ledger import Ledger
 from alpaca_day_bot.strategy.v1_rules import V1RulesSignalEngine
+from alpaca_day_bot.tools.triple_barrier_yfinance import (
+    realized_return_from_last_close,
+    triple_barrier_outcome_from_bars,
+)
 from alpaca_day_bot.trading.client import make_trading_client
 from alpaca_day_bot.trading.executor import OrderExecutor
 from alpaca_day_bot.trading.updates import TradeUpdateEvent, TradingUpdatesStreamer
@@ -49,6 +59,50 @@ from alpaca_day_bot.universe import (
 
 
 log = logging.getLogger("alpaca_day_bot")
+
+# Session equity override: treat paper account as if it starts at a smaller number
+# while still reflecting real P&L changes.
+_LIVE_EQUITY_ANCHOR: float | None = None
+
+
+def _effective_equity(settings, equity_live: float) -> float:
+    """
+    If EQUITY_OVERRIDE_USD is set (>0), report equity as:
+      override + (live - live_at_boot)
+    so P&L is preserved but sizing starts from a smaller baseline.
+    """
+    global _LIVE_EQUITY_ANCHOR
+    try:
+        eq_override = float(getattr(settings, "equity_override_usd", 0.0) or 0.0)
+    except Exception:
+        eq_override = 0.0
+    if eq_override <= 0:
+        return float(equity_live)
+    if _LIVE_EQUITY_ANCHOR is None:
+        _LIVE_EQUITY_ANCHOR = float(equity_live)
+    return float(eq_override) + (float(equity_live) - float(_LIVE_EQUITY_ANCHOR))
+
+
+def _accept_ml_bundle_for_live(bundle: dict | None, settings, name: str) -> dict | None:
+    """Drop bundles that cannot be scored like live signals or that settings forbid."""
+    if bundle is None:
+        return None
+    meta = bundle.get("meta")
+    meta_d = meta if isinstance(meta, dict) else {}
+    ok, err = live_inference_path_ok(meta_d)
+    if not ok:
+        log.warning("ml_bundle_rejected_inference_path name=%s err=%s", name, err)
+        return None
+    ok_fv, err_fv = feature_vector_id_ok(meta_d)
+    if not ok_fv:
+        log.warning("ml_bundle_rejected_feature_vector name=%s err=%s", name, err_fv)
+        return None
+    if bool(getattr(settings, "ml_inference_disallow_executed_dataset", False)):
+        dk = str(meta_d.get("dataset_kind") or "")
+        if dk.startswith("executed"):
+            log.warning("ml_bundle_rejected_executed_dataset name=%s dataset_kind=%s", name, dk)
+            return None
+    return bundle
 
 
 def _acquire_single_instance_lock(state_dir: Path) -> object | None:
@@ -153,18 +207,18 @@ def _label_signals_forward_returns(
     buffer: BarBuffer,
     settings,
     t0: datetime,
-    market_day: date,
+    _market_day: date,
 ) -> None:
     if not settings.signal_accuracy_enabled:
         return
     if not bool(getattr(settings, "label_forward_returns_enabled", True)):
         return
-    pending = ledger.list_unlabeled_signal_rows(
-        market_day=market_day,
-        tz=settings.tzinfo(),
+    blim = int(getattr(settings, "signal_label_backlog_per_tick", 250) or 250)
+    pending = ledger.list_unlabeled_signal_rows_backlog(
         now_utc=t0,
         min_age_minutes=float(settings.signal_accuracy_min_age_minutes),
         actions=("BUY", "SHORT"),
+        limit=max(1, blim),
     )
     for signal_id, ts_s, sym, action, feat_json in pending:
         df = _run_sync(buffer.snapshot_df(sym))
@@ -210,7 +264,7 @@ def _label_signals_triple_barrier(
     buffer: BarBuffer,
     settings,
     t0: datetime,
-    market_day: date,
+    _market_day: date,
 ) -> None:
     """
     Triple-barrier style labeling aligned to exits:
@@ -220,12 +274,12 @@ def _label_signals_triple_barrier(
     """
     if not settings.signal_accuracy_enabled:
         return
-    pending = ledger.list_unlabeled_signal_rows_for_triple_barrier(
-        market_day=market_day,
-        tz=settings.tzinfo(),
+    blim = int(getattr(settings, "signal_label_backlog_per_tick", 250) or 250)
+    pending = ledger.list_unlabeled_signal_rows_for_triple_barrier_backlog(
         now_utc=t0,
         min_age_minutes=float(settings.signal_accuracy_min_age_minutes),
         actions=("BUY", "SHORT"),
+        limit=max(1, blim),
     )
     for signal_id, ts_s, sym, action, feat_json in pending:
         try:
@@ -261,8 +315,6 @@ def _label_signals_triple_barrier(
         if df is None or getattr(df, "empty", True):
             continue
         try:
-            import pandas as pd
-
             dfx = df.copy()
             dfx.index = pd.to_datetime(dfx.index, utc=True, errors="coerce")
             dfx = dfx.sort_index()
@@ -284,37 +336,16 @@ def _label_signals_triple_barrier(
             continue
 
         act = (action or "").strip().upper()
-        outcome = "timeout"
-        px_at_eval = float(dfx["close"].iloc[-1])
-
-        try:
-            for _idx, row in dfx.iterrows():
-                hi = float(row["high"])
-                lo = float(row["low"])
-                if act == "SHORT":
-                    # TP is below, SL above
-                    if lo <= tp_f:
-                        outcome = "tp"
-                        break
-                    if hi >= sl_f:
-                        outcome = "sl"
-                        break
-                else:
-                    # BUY
-                    if hi >= tp_f:
-                        outcome = "tp"
-                        break
-                    if lo <= sl_f:
-                        outcome = "sl"
-                        break
-        except Exception:
-            outcome = "timeout"
-
-        # realized return proxy at evaluation time (mark-to-market), but label is barrier-first.
-        if act == "SHORT":
-            realized_ret = (entry_f - px_at_eval) / entry_f
-        else:
-            realized_ret = (px_at_eval - entry_f) / entry_f
+        outcome, px_at_eval = triple_barrier_outcome_from_bars(
+            dfx,
+            act=act,
+            entry_f=entry_f,
+            tp_f=tp_f,
+            sl_f=sl_f,
+        )
+        if not isinstance(px_at_eval, float) or px_at_eval != px_at_eval:
+            continue
+        realized_ret = realized_return_from_last_close(act=act, entry_f=entry_f, px_at_eval=px_at_eval)
 
         ledger.record_triple_barrier_label(
             signal_id=int(signal_id),
@@ -347,9 +378,17 @@ def _run_in_window_trading_cycle(
     market_now = t0.astimezone(settings.tzinfo())
     asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
 
-    equity = executor.get_account_equity()
-    gross = executor.gross_exposure_usd()
-    open_positions = executor.open_positions_count()
+    try:
+        equity_live = float(executor.get_account_equity())
+        gross = float(executor.gross_exposure_usd())
+        open_positions = int(executor.open_positions_count())
+        equity = _effective_equity(settings, equity_live)
+        if not math.isfinite(equity) or equity <= 0:
+            raise ValueError(f"non_finite_equity:{equity}")
+    except Exception as e:
+        # Transient network / Alpaca REST hiccups should not crash the whole bot loop.
+        log.warning("account_snapshot_failed err=%s", e)
+        return last_signal_scan_ts
 
     # Load ML bundles early so entries/exits can use them (separate BUY vs SHORT models).
     ml_bundle_buy = None
@@ -357,16 +396,21 @@ def _run_in_window_trading_cycle(
     if bool(getattr(settings, "model_enabled", False)):
         mp_buy = getattr(settings, "model_path_long", "") or ""
         mp_short = getattr(settings, "model_path_short", "") or ""
-        ml_bundle_buy = _load_ml_model(mp_buy) if mp_buy else None
-        ml_bundle_short = _load_ml_model(mp_short) if mp_short else None
+        ml_bundle_buy = _accept_ml_bundle_for_live(_load_ml_model(mp_buy) if mp_buy else None, settings, "long")
+        ml_bundle_short = _accept_ml_bundle_for_live(_load_ml_model(mp_short) if mp_short else None, settings, "short")
         if ml_bundle_buy is None and ml_bundle_short is None:
             # Back-compat: try single-model path.
             mp = getattr(settings, "model_path", "state/models/latest.joblib")
-            ml = _load_ml_model(mp)
+            ml = _accept_ml_bundle_for_live(_load_ml_model(mp), settings, "legacy_single")
             ml_bundle_buy = ml
             ml_bundle_short = ml
             if ml is None:
                 log.warning("ml_model_not_loaded paths=%s,%s,%s", mp_buy, mp_short, mp)
+
+    # Model exit uses the bundle that matches position side when both are loaded.
+    ml_bundle_exit = None
+    if ml_bundle_buy is not None or ml_bundle_short is not None:
+        ml_bundle_exit = ml_bundle_buy if ml_bundle_buy is not None else ml_bundle_short
 
     # Per-cycle caches (avoid repeated external calls in a single scheduled tick).
     taapi_cache: dict[str, dict] = {}
@@ -690,11 +734,11 @@ def _run_in_window_trading_cycle(
             pass
 
     # Model-based early exit: re-score open positions and close when confidence degrades.
-    _exit_meta = (ml_bundle.get("meta") if isinstance(ml_bundle, dict) else None) or {}
+    _exit_meta = (ml_bundle_exit.get("meta") if isinstance(ml_bundle_exit, dict) else None) or {}
     _skip_model_exit_for_regression = isinstance(_exit_meta, dict) and str(_exit_meta.get("task") or "").lower() == "regression"
     if (
         bool(getattr(settings, "model_exit_enabled", False))
-        and ml_bundle is not None
+        and ml_bundle_exit is not None
         and not _skip_model_exit_for_regression
     ):
         try:
@@ -733,7 +777,12 @@ def _run_in_window_trading_cycle(
                     if rlbl:
                         feat_now["regime"] = rlbl
 
-                    md = _ml_predict_proba(ml_bundle, feat_now)
+                    exit_bundle = (
+                        ml_bundle_buy
+                        if act == "BUY" and ml_bundle_buy is not None
+                        else (ml_bundle_short if act == "SHORT" and ml_bundle_short is not None else ml_bundle_exit)
+                    )
+                    md = _ml_predict_proba(exit_bundle, feat_now)
                     if (not md.ok) or (md.proba is None):
                         continue
                     if float(md.proba) >= thr:
@@ -849,6 +898,14 @@ def _run_in_window_trading_cycle(
         try:
             mvr = float(getattr(settings, "min_volume_ratio_trade", 0.0) or 0.0)
             vr = float(feat.get("volume_ratio") or 0.0)
+            # Loosen the volume gate a bit in "good regimes" (trend + low vol) to avoid stalling.
+            try:
+                rv = feat.get("rule_votes") or {}
+                good_regime = bool((rv.get("long") or {}).get("good_regime"))
+                if good_regime and mvr > 0:
+                    mvr = max(0.70, float(mvr) * 0.85)
+            except Exception:
+                pass
             if mvr > 0 and vr > 0 and vr < mvr:
                 ledger.record_order_intent(
                     ts=t0,
@@ -1212,7 +1269,8 @@ def _run_in_window_trading_cycle(
             ts=t0,
             symbol=sym,
             side=side,
-            notional_usd=rd.notional_usd,
+            # Use realized notional based on whole-share qty to reflect caps accurately.
+            notional_usd=float(min(float(rd.notional_usd or 0.0), float(qty_int) * float(last_close))),
             stop_price=stop_price,
             take_profit_price=tp_price,
             client_order_id=res.client_order_id,
@@ -1305,7 +1363,11 @@ def _run_in_window_trading_cycle(
 
     ml_bundle = None
     if bool(getattr(settings, "model_enabled", False)):
-        ml_bundle = _load_ml_model(getattr(settings, "model_path", "state/models/latest.joblib"))
+        ml_bundle = _accept_ml_bundle_for_live(
+            _load_ml_model(getattr(settings, "model_path", "state/models/latest.joblib")),
+            settings,
+            "scheduled_single",
+        )
 
     candidates_for_ml: list[dict] = []
     asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
@@ -1493,14 +1555,14 @@ def _run_in_window_trading_cycle(
         buffer=buffer,
         settings=settings,
         t0=t0,
-        market_day=market_day,
+        _market_day=market_day,
     )
     _label_signals_triple_barrier(
         ledger=ledger,
         buffer=buffer,
         settings=settings,
         t0=t0,
-        market_day=market_day,
+        _market_day=market_day,
     )
     return last_signal_scan_ts
 
@@ -1771,7 +1833,7 @@ def run(
     # This keeps the master/liquid universe large but makes per-tick execution practical.
     try:
         asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
-        if scheduled_tick and asset_class == "equity" and bool(getattr(settings, "prefilter_enabled", False)):
+        if asset_class == "equity" and bool(getattr(settings, "prefilter_enabled", False)):
             pf_n = int(getattr(settings, "prefilter_max_symbols", 400) or 400)
             pf_m = str(getattr(settings, "prefilter_method", "movers_actives") or "movers_actives")
             pre = intraday_prefilter_symbols(
@@ -1780,14 +1842,26 @@ def run(
                 method=pf_m,
                 max_symbols=pf_n,
             )
+            base = [str(s).strip().upper() for s in (settings.symbols or []) if str(s).strip()]
+            base_set = set(base)
             if pre:
-                base_set = {str(s).strip().upper() for s in (settings.symbols or []) if str(s).strip()}
                 pre_u = [s for s in pre if s in base_set] or pre
-                settings.symbols = pre_u  # type: ignore[assignment]
-                log.info(
-                    "prefilter_applied",
-                    extra={"extra_json": {"method": pf_m, "requested": pf_n, "selected": len(pre_u)}},
-                )
+            else:
+                # If screener endpoints aren't available / return nothing, fall back to a stable subset
+                # so the bot remains operational with large universes.
+                pre_u = sorted(base_set)[: max(1, pf_n)]
+            settings.symbols = pre_u  # type: ignore[assignment]
+            log.info(
+                "prefilter_applied",
+                extra={
+                    "extra_json": {
+                        "method": pf_m,
+                        "requested": pf_n,
+                        "selected": len(pre_u),
+                        "fallback_used": (not bool(pre)),
+                    }
+                },
+            )
     except Exception:
         pass
 
@@ -1880,6 +1954,38 @@ def run(
         per_symbol_cooldown_s=settings.per_symbol_cooldown_s,
         daily_profit_target_usd=settings.daily_profit_target_usd,
     )
+    # If we have a prior session reset today, reuse its live-equity anchor so the $500-session P&L
+    # remains consistent across restarts. Only do this when we're not forcing a new reset on boot.
+    try:
+        eq_override0 = float(getattr(settings, "equity_override_usd", 0.0) or 0.0)
+    except Exception:
+        eq_override0 = 0.0
+    global _LIVE_EQUITY_ANCHOR
+    if eq_override0 > 0 and not bool(getattr(settings, "reset_start_equity_on_boot", False)):
+        try:
+            md0 = now_utc().astimezone(settings.tzinfo()).date()
+            sr = ledger.latest_session_reset_for_day(md0)
+            if sr and float(sr.get("equity_override") or 0.0) > 0:
+                _LIVE_EQUITY_ANCHOR = float(sr["live_equity_anchor"])
+        except Exception:
+            pass
+    if bool(getattr(settings, "reset_start_equity_on_boot", False)):
+        # Reset session anchor so equity starts at EQUITY_OVERRIDE_USD on this process boot.
+        _LIVE_EQUITY_ANCHOR = None
+        eq_override = float(getattr(settings, "equity_override_usd", 0.0) or 0.0)
+        if eq_override > 0:
+            market_day = now_utc().astimezone(settings.tzinfo()).date()
+            risk.force_set_start_equity(market_day, eq_override)
+            try:
+                anchor_live = float(executor.get_account_equity())
+                ledger.record_session_reset(
+                    ts=now_utc(),
+                    market_day=market_day,
+                    live_equity_anchor=anchor_live,
+                    equity_override=eq_override,
+                )
+            except Exception:
+                pass
     # Two strategy instances: conservative always; aggressive used only in good regimes.
     #
     # NOTE: Several helper functions reference these by name; bind them at module scope.
@@ -2049,9 +2155,14 @@ def run(
         # Crypto trades 24/7; don't apply US-equities time window gates.
         in_window = True if asset_class == "crypto" else (settings.trade_start <= mt <= settings.trade_end)
         risk.rehydrate_from_ledger(ledger, market_day, settings.tzinfo())
-        equity = executor.get_account_equity()
+        equity_live = float(executor.get_account_equity())
         gross = executor.gross_exposure_usd()
+        equity = _effective_equity(settings, equity_live)
         ledger.record_equity_snapshot(t0, equity, gross)
+        if bool(getattr(settings, "reset_start_equity_on_boot", False)):
+            eq_override = float(getattr(settings, "equity_override_usd", 0.0) or 0.0)
+            if eq_override > 0:
+                risk.force_set_start_equity(market_day, eq_override)
         last_report_day = market_day
         try:
             # Flatten before close (avoid overnight holds) — equities only.
@@ -2144,8 +2255,10 @@ def run(
 
             # Periodic equity snapshot.
             if (t0 - last_equity_snap) >= timedelta(seconds=60):
-                equity = executor.get_account_equity()
+                equity_live = executor.get_account_equity()
                 gross = executor.gross_exposure_usd()
+                eq_override = float(getattr(settings, "equity_override_usd", 0.0) or 0.0)
+                equity = float(eq_override) if eq_override > 0 else float(equity_live)
                 ledger.record_equity_snapshot(t0, equity, gross)
                 last_equity_snap = t0
 
@@ -2184,7 +2297,7 @@ def run(
                     ledger=ledger,
                     executor=executor,
                     buffer=buffer,
-                    strategy=strategy,
+                    strategy=strategy_cons,
                     risk=risk,
                     t0=t0,
                     market_day=market_day,

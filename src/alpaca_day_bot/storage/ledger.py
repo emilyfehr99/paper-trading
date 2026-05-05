@@ -66,6 +66,16 @@ class Ledger:
               gross_exposure REAL NOT NULL
             );
 
+            -- When we "reset" a paper account to a smaller session equity baseline,
+            -- store the live equity anchor so we can compute P&L since reset.
+            CREATE TABLE IF NOT EXISTS session_resets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT NOT NULL,
+              market_day TEXT NOT NULL,
+              live_equity_anchor REAL NOT NULL,
+              equity_override REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS signals (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts TEXT NOT NULL,
@@ -226,6 +236,42 @@ class Ledger:
                 (ts.isoformat(), float(equity), float(gross_exposure)),
             )
             self._conn.commit()
+
+    def record_session_reset(
+        self, *, ts: datetime, market_day: date, live_equity_anchor: float, equity_override: float
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+            INSERT INTO session_resets (ts, market_day, live_equity_anchor, equity_override)
+            VALUES (?, ?, ?, ?)
+                """,
+                (ts.isoformat(), market_day.isoformat(), float(live_equity_anchor), float(equity_override)),
+            )
+            self._conn.commit()
+
+    def latest_session_reset_for_day(self, market_day: date) -> dict[str, Any] | None:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT ts, market_day, live_equity_anchor, equity_override
+                FROM session_resets
+                WHERE market_day = ?
+                ORDER BY ts DESC
+                LIMIT 1
+                """,
+                (market_day.isoformat(),),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        ts, md, anchor, override = row
+        return {
+            "ts": ts,
+            "market_day": md,
+            "live_equity_anchor": float(anchor),
+            "equity_override": float(override),
+        }
 
     def submitted_entry_stats_for_trading_date(
         self, market_day: date, tz: ZoneInfo
@@ -542,6 +588,98 @@ class Ledger:
             rows = cur.fetchall()
         rows_out: list[tuple[int, str, str, str, str]] = []
         for sid, ts_s, sym, act, feat in rows:
+            if not feat:
+                continue
+            try:
+                ts_p = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if ts_p.tzinfo is None:
+                ts_p = ts_p.replace(tzinfo=timezone.utc)
+            age_m = (now_utc - ts_p).total_seconds() / 60.0
+            if age_m < float(min_age_minutes):
+                continue
+            rows_out.append((int(sid), ts_s, str(sym), str(act), str(feat)))
+        return rows_out
+
+    def list_unlabeled_signal_rows_backlog(
+        self,
+        *,
+        now_utc: datetime,
+        min_age_minutes: float,
+        actions: tuple[str, ...] = ("BUY", "SHORT"),
+        limit: int = 250,
+    ) -> list[tuple[int, str, str, str, str]]:
+        """
+        Signals missing ``forward_return_labels`` (any calendar day), older than ``min_age_minutes``.
+
+        The per-day listers miss historical rows once the session changes; this drains backlog for ML labels.
+        """
+        actions_u = tuple(str(a).upper() for a in actions)
+        lim = max(1, int(limit))
+        sql_cap = min(5000, max(lim * 40, lim))
+        with self._lock:
+            cur = self._conn.execute(
+                """
+            SELECT s.id, s.ts, s.symbol, s.action, s.features_json
+            FROM signals s
+            LEFT JOIN forward_return_labels f ON f.signal_id = s.id
+            WHERE s.action IN ({acts})
+              AND f.signal_id IS NULL
+            ORDER BY s.ts ASC
+            LIMIT ?
+                """.format(acts=",".join(["?"] * len(actions_u))),
+                (*actions_u, sql_cap),
+            )
+            rows = cur.fetchall()
+        rows_out: list[tuple[int, str, str, str, str]] = []
+        for sid, ts_s, sym, act, feat in rows:
+            if len(rows_out) >= lim:
+                break
+            if not feat:
+                continue
+            try:
+                ts_p = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if ts_p.tzinfo is None:
+                ts_p = ts_p.replace(tzinfo=timezone.utc)
+            age_m = (now_utc - ts_p).total_seconds() / 60.0
+            if age_m < float(min_age_minutes):
+                continue
+            rows_out.append((int(sid), ts_s, str(sym), str(act), str(feat)))
+        return rows_out
+
+    def list_unlabeled_signal_rows_for_triple_barrier_backlog(
+        self,
+        *,
+        now_utc: datetime,
+        min_age_minutes: float,
+        actions: tuple[str, ...] = ("BUY", "SHORT"),
+        limit: int = 250,
+    ) -> list[tuple[int, str, str, str, str]]:
+        """Like ``list_unlabeled_signal_rows_for_triple_barrier`` but any day (oldest backlog first)."""
+        actions_u = tuple(str(a).upper() for a in actions)
+        lim = max(1, int(limit))
+        sql_cap = min(5000, max(lim * 40, lim))
+        with self._lock:
+            cur = self._conn.execute(
+                """
+            SELECT s.id, s.ts, s.symbol, s.action, s.features_json
+            FROM signals s
+            LEFT JOIN triple_barrier_labels tb ON tb.signal_id = s.id
+            WHERE s.action IN ({acts})
+              AND tb.signal_id IS NULL
+            ORDER BY s.ts ASC
+            LIMIT ?
+                """.format(acts=",".join(["?"] * len(actions_u))),
+                (*actions_u, sql_cap),
+            )
+            rows = cur.fetchall()
+        rows_out: list[tuple[int, str, str, str, str]] = []
+        for sid, ts_s, sym, act, feat in rows:
+            if len(rows_out) >= lim:
+                break
             if not feat:
                 continue
             try:
