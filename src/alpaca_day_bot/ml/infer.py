@@ -1,14 +1,25 @@
 from __future__ import annotations
 
-import json
+import logging
 import math
+import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
 import pandas as pd
+
+from alpaca_day_bot.ml.dataset import (
+    LIVE_INFERENCE_PATH_SIGNAL_FEATURES,
+    SUPPORTED_FEATURE_VECTOR_IDS,
+    _parse_iso_dt,
+    flatten_signal_features,
+)
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -21,186 +32,70 @@ class ModelDecision:
     regression_pred: float | None = None
 
 
-def _flatten_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
+def _infer_anchor_ts(features: dict[str, Any]) -> datetime:
     """
-    Convert the per-signal features_json dict into a flat numeric dict that matches training columns.
-    Keep this in sync with ml.dataset.build_signal_label_dataset().
+    Anchor for UTC time columns + news recency. Prefer explicit ``ts`` / ``signal_ts`` from
+    the live feature dict; otherwise use UTC wall clock so columns stay finite (matches
+    training when DB signal time is the anchor).
     """
     feat = features if isinstance(features, dict) else {}
-    news = feat.get("news") if isinstance(feat.get("news"), dict) else None
-    taapi = feat.get("taapi") if isinstance(feat.get("taapi"), dict) else None
-
-    # minimal inline feature extraction (avoid importing ml.dataset to keep runtime small)
-    def f(x):
-        try:
-            return float(x)
-        except Exception:
-            return float("nan")
-
-    x: dict[str, Any] = {
-        "close": f(feat.get("close")),
-        "rsi_14": f(feat.get("rsi_14")),
-        "htf_rsi": f(feat.get("htf_rsi")),
-        "ema": f(feat.get("ema")),
-        "ema_9": f(feat.get("ema_9")),
-        "ema_21": f(feat.get("ema_21")),
-        "ema_9_21_bias": f(feat.get("ema_9_21_bias")),
-        "alligator_jaw": f(feat.get("alligator_jaw")),
-        "alligator_teeth": f(feat.get("alligator_teeth")),
-        "alligator_lips": f(feat.get("alligator_lips")),
-        "alligator_trend_up": f(feat.get("alligator_trend_up")),
-        "alligator_trend_down": f(feat.get("alligator_trend_down")),
-        "macd": f(feat.get("macd")),
-        "macd_signal": f(feat.get("macd_signal")),
-        "vwap": f(feat.get("vwap")),
-        "volume_ratio": f(feat.get("volume_ratio")),
-        "atr": f(feat.get("atr")),
-        "atr_avg": f(feat.get("atr_avg")),
-        "atr_monthly": f(feat.get("atr_monthly")),
-        "htf_ok_long": 1.0 if bool(feat.get("htf_ok_long")) else 0.0,
-        "htf_ok_short": 1.0 if bool(feat.get("htf_ok_short")) else 0.0,
-        "is_buy": 1.0,
-    }
-    try:
-        act = (feat.get("action") or feat.get("signal_action") or "").strip().upper()
-        if act in ("SHORT", "SELL"):
-            x["is_buy"] = 0.0
-    except Exception:
-        pass
-
-    # Time-of-day context (if ts captured in features; else NaN)
-    try:
-        ts_s = feat.get("ts") or feat.get("signal_ts")  # not currently set; ok
-        dt = None
-        if isinstance(ts_s, str) and ts_s:
-            from datetime import datetime, timezone
-
-            dt = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-        if dt is None:
-            raise ValueError("no_ts")
-        x["hour_utc"] = float(dt.hour)
-        x["minute_utc"] = float(dt.minute)
-        x["dow_utc"] = float(dt.weekday())
-    except Exception:
-        x["hour_utc"] = float("nan")
-        x["minute_utc"] = float("nan")
-        x["dow_utc"] = float("nan")
-
-    # Setup type (reason)
-    rs = (feat.get("reason") or "").strip().lower()
-    x["setup_long_pullback"] = 1.0 if rs == "long_rsi_macd_vwap_volume" else 0.0
-    x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
-    x["setup_crypto_macd_alligator_momo"] = 1.0 if rs == "crypto_macd_alligator_momo" else 0.0
-    x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
-    x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
-    x["setup_short_rsi_overbought_fade"] = 1.0 if rs == "short_rsi_overbought_fade" else 0.0
-    x["setup_short_bb_upper_fade"] = 1.0 if rs == "short_bb_upper_fade" else 0.0
-    x["setup_short_break_retest"] = 1.0 if rs == "short_break_retest" else 0.0
-
-    # News
-    if isinstance(news, dict) and isinstance(news.get("articles"), list):
-        arts = [a for a in news.get("articles", []) if isinstance(a, dict)]
-        x["news_ok"] = 1.0 if bool(news.get("ok")) else 0.0
-        x["news_count"] = float(len(arts))
-        x["news_recency_min"] = float("nan")
-        x["news_sent_wmean"] = float("nan")
-        x["news_event_risk"] = 0.0
-        sent = []
-        sent_w = []
-        src_counts = {"alpaca": 0, "alphavantage": 0, "google_rss": 0, "tickertick": 0}
-        risk_words = (
-            "earnings",
-            "offering",
-            "secondary",
-            "sec ",
-            "investigation",
-            "lawsuit",
-            "downgrade",
-            "upgrade",
-            "guidance",
-            "merger",
-            "acquisition",
-            "halt",
-            "bankruptcy",
-        )
-        for a in arts:
-            prov = (a.get("provider") or "").strip().lower()
-            if prov in src_counts:
-                src_counts[prov] += 1
-            txt = f"{a.get('headline') or ''} {a.get('summary') or ''}".strip().lower()
-            if txt and any(w in txt for w in risk_words):
-                x["news_event_risk"] = 1.0
-            s = a.get("sentiment_score")
-            if s is not None:
-                try:
-                    sv = float(s)
-                    sent.append(sv)
-                    # weight by recency if possible
-                    w = 1.0
-                    created = a.get("created_at")
-                    if isinstance(created, str) and created:
-                        try:
-                            from datetime import datetime, timezone
-
-                            dtc = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                            if dtc.tzinfo is None:
-                                dtc = dtc.replace(tzinfo=timezone.utc)
-                            # use the signal timestamp if available (dt) else don't weight
-                            if "hour_utc" in x and isinstance(dt, datetime):
-                                age_min = max(0.0, (dt - dtc).total_seconds() / 60.0)
-                                w = 1.0 / (1.0 + (age_min / 60.0))
-                        except Exception:
-                            w = 1.0
-                    sent_w.append((sv, w))
-                except Exception:
-                    pass
-        x["news_sent_mean"] = float(sum(sent) / len(sent)) if sent else float("nan")
-        x["news_sent_wmean"] = (
-            float(sum(v * w for v, w in sent_w) / sum(w for _v, w in sent_w)) if sent_w else float("nan")
-        )
-        x["news_sent_present"] = 1.0 if sent else 0.0
-        x["news_src_alpaca"] = float(src_counts["alpaca"])
-        x["news_src_alphavantage"] = float(src_counts["alphavantage"])
-        x["news_src_google_rss"] = float(src_counts["google_rss"])
-        x["news_src_tickertick"] = float(src_counts["tickertick"])
+    ts_s = feat.get("ts") or feat.get("signal_ts")
+    dt = _parse_iso_dt(ts_s) if isinstance(ts_s, str) else None
+    if dt is not None:
+        return dt
+    if os.environ.get("ML_INFER_LOG_ANCHOR_FALLBACK", "").strip() in ("1", "true", "yes"):
+        _log.info("ml_infer_anchor_fallback_utc missing ts/signal_ts in feature dict")
     else:
-        x.update(
-            {
-                "news_ok": 0.0,
-                "news_count": 0.0,
-                "news_recency_min": float("nan"),
-                "news_sent_mean": float("nan"),
-                "news_sent_wmean": float("nan"),
-                "news_sent_present": 0.0,
-                "news_event_risk": 0.0,
-                "news_src_alpaca": 0.0,
-                "news_src_alphavantage": 0.0,
-                "news_src_google_rss": 0.0,
-                "news_src_tickertick": 0.0,
-            }
-        )
+        _log.debug("ml_infer_anchor_fallback_utc missing ts/signal_ts in feature dict")
+    return datetime.now(tz=timezone.utc)
 
-    # TAAPI
-    if isinstance(taapi, dict):
-        x["taapi_rsi_1m"] = f(taapi.get("rsi_1m"))
-        x["taapi_rsi_15m"] = f(taapi.get("rsi_15m"))
-        x["taapi_macd_1m"] = f(taapi.get("macd_1m"))
-        x["taapi_macd_signal_1m"] = f(taapi.get("macd_signal_1m"))
-        x["taapi_present"] = 1.0
-    else:
-        x.update(
-            {
-                "taapi_rsi_1m": float("nan"),
-                "taapi_rsi_15m": float("nan"),
-                "taapi_macd_1m": float("nan"),
-                "taapi_macd_signal_1m": float("nan"),
-                "taapi_present": 0.0,
-            }
-        )
 
-    return x
+def _flatten_feature_dict(features: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert the per-signal ``features_json`` dict into a flat numeric dict for inference.
+
+    Delegates to :func:`alpaca_day_bot.ml.dataset.flatten_signal_features` so training and
+    live scoring cannot drift.
+    """
+    feat = features if isinstance(features, dict) else {}
+    act = str(feat.get("action") or feat.get("signal_action") or "BUY")
+    reason = str(feat.get("reason") or "")
+    anchor = _infer_anchor_ts(feat)
+    return flatten_signal_features(feat, reason=reason, action=act, anchor_ts=anchor)
+
+
+def feature_vector_id_ok(meta: dict[str, Any] | None) -> tuple[bool, str | None]:
+    """
+    If ``feature_vector_id`` is present on the artifact, it must be in the supported set.
+    Missing key = legacy bundle (allowed).
+    """
+    if not isinstance(meta, dict):
+        return True, None
+    fvid = meta.get("feature_vector_id")
+    if fvid is None or str(fvid).strip() == "":
+        return True, None
+    if str(fvid) not in SUPPORTED_FEATURE_VECTOR_IDS:
+        return False, "unsupported_feature_vector_id"
+    return True, None
+
+
+def live_inference_path_ok(meta: dict[str, Any] | None) -> tuple[bool, str | None]:
+    """
+    Return (False, code) if this artifact cannot be scored from live signal features alone.
+
+    Legacy bundles omit ``live_inference_path`` and are treated as compatible.
+    """
+    if not isinstance(meta, dict):
+        return True, None
+    lip = meta.get("live_inference_path")
+    if lip is None:
+        return True, None
+    lip_s = str(lip).strip()
+    if lip_s == "executed_context":
+        return False, "unsupported_live_inference_path"
+    if lip_s and lip_s != str(LIVE_INFERENCE_PATH_SIGNAL_FEATURES):
+        return False, "unsupported_live_inference_path"
+    return True, None
 
 
 def load_model(path: str) -> dict[str, Any] | None:
@@ -238,6 +133,26 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
         meta = model_bundle.get("meta") or {}
         provider = str(meta.get("provider")) if isinstance(meta, dict) else None
         task = str(meta.get("task") or "classification").strip().lower()
+        ok_path, path_err = live_inference_path_ok(meta if isinstance(meta, dict) else None)
+        if not ok_path:
+            return ModelDecision(
+                ok=False,
+                provider=provider,
+                proba=None,
+                error=path_err or "unsupported_live_inference_path",
+                task=str(task),
+                regression_pred=None,
+            )
+        ok_fv, fv_err = feature_vector_id_ok(meta if isinstance(meta, dict) else None)
+        if not ok_fv:
+            return ModelDecision(
+                ok=False,
+                provider=provider,
+                proba=None,
+                error=fv_err or "unsupported_feature_vector_id",
+                task=str(task),
+                regression_pred=None,
+            )
         cols = meta.get("feature_columns") if isinstance(meta, dict) else None
         if isinstance(cols, list) and len(cols) == 0:
             return ModelDecision(
@@ -368,4 +283,3 @@ def predict_proba(*, model_bundle: dict[str, Any], features: dict[str, Any]) -> 
             task="classification",
             regression_pred=None,
         )
-

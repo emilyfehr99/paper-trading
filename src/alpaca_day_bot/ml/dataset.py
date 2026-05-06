@@ -166,6 +166,77 @@ def _taapi_features(taapi: dict[str, Any] | None) -> dict[str, float]:
     }
 
 
+# Single source of truth for supervised feature rows (signals, sim, executed, live infer).
+FEATURE_VECTOR_ID = "signal_flatten_v1"
+LIVE_INFERENCE_PATH_SIGNAL_FEATURES = "signal_features"
+# When bumping the flatten schema, add the new id here and add a regression test for rejection of unknown ids.
+SUPPORTED_FEATURE_VECTOR_IDS: frozenset[str] = frozenset({FEATURE_VECTOR_ID})
+
+
+def flatten_signal_features(
+    feat: dict[str, Any],
+    *,
+    reason: str,
+    action: str,
+    anchor_ts: datetime,
+) -> dict[str, Any]:
+    """
+    Flatten features_json (+ reason/action) into one ML row.
+
+    ``anchor_ts`` is used for UTC time-of-day columns and as the recency anchor for news
+    (must match training: signal DB timestamp or explicit signal time, not wall clock unless intended).
+    """
+    if not isinstance(feat, dict):
+        feat = {}
+    act_u = str(action or "BUY").strip().upper() or "BUY"
+
+    x: dict[str, Any] = {
+        "close": _to_float(feat.get("close")),
+        "rsi_14": _to_float(feat.get("rsi_14")),
+        "htf_rsi": _to_float(feat.get("htf_rsi")),
+        "ema": _to_float(feat.get("ema")),
+        "ema_9": _to_float(feat.get("ema_9")),
+        "ema_21": _to_float(feat.get("ema_21")),
+        "ema_9_21_bias": _to_float(feat.get("ema_9_21_bias")),
+        "alligator_jaw": _to_float(feat.get("alligator_jaw")),
+        "alligator_teeth": _to_float(feat.get("alligator_teeth")),
+        "alligator_lips": _to_float(feat.get("alligator_lips")),
+        "alligator_trend_up": _to_float(feat.get("alligator_trend_up")),
+        "alligator_trend_down": _to_float(feat.get("alligator_trend_down")),
+        "macd": _to_float(feat.get("macd")),
+        "macd_signal": _to_float(feat.get("macd_signal")),
+        "vwap": _to_float(feat.get("vwap")),
+        "volume_ratio": _to_float(feat.get("volume_ratio")),
+        "atr": _to_float(feat.get("atr")),
+        "atr_avg": _to_float(feat.get("atr_avg")),
+        "atr_monthly": _to_float(feat.get("atr_monthly")),
+        "htf_ok_long": 1.0 if bool(feat.get("htf_ok_long")) else 0.0,
+        "htf_ok_short": 1.0 if bool(feat.get("htf_ok_short")) else 0.0,
+        "is_buy": 1.0 if act_u == "BUY" else 0.0,
+        "hour_utc": float(anchor_ts.hour),
+        "minute_utc": float(anchor_ts.minute),
+        "dow_utc": float(anchor_ts.weekday()),
+    }
+
+    rs = (reason or "").strip().lower()
+    x["setup_long_pullback"] = 1.0 if rs == "long_rsi_macd_vwap_volume" else 0.0
+    x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
+    x["setup_crypto_macd_alligator_momo"] = 1.0 if rs == "crypto_macd_alligator_momo" else 0.0
+    x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
+    x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
+    x["setup_short_rsi_overbought_fade"] = 1.0 if rs == "short_rsi_overbought_fade" else 0.0
+    x["setup_short_bb_upper_fade"] = 1.0 if rs == "short_bb_upper_fade" else 0.0
+    x["setup_short_break_retest"] = 1.0 if rs == "short_break_retest" else 0.0
+
+    news = feat.get("news") if isinstance(feat.get("news"), dict) else None
+    x.update(_news_features(news, now_ts=anchor_ts))
+
+    taapi = feat.get("taapi") if isinstance(feat.get("taapi"), dict) else None
+    x.update(_taapi_features(taapi))
+
+    return x
+
+
 def build_signal_label_dataset(
     *,
     db_path: str,
@@ -222,13 +293,6 @@ def build_signal_label_dataset(
         ts = _parse_iso_dt(ts_s) or datetime.now(tz=timezone.utc)
         now_ts = ts  # features are at signal-time; use ts as anchor for recency calcs
 
-        # Time-of-day context (UTC; stable in CI). Model can learn when signals work.
-        x_time = {
-            "hour_utc": float(ts.hour),
-            "minute_utc": float(ts.minute),
-            "dow_utc": float(ts.weekday()),
-        }
-
         feat = {}
         if feat_json and isinstance(feat_json, str):
             try:
@@ -238,51 +302,12 @@ def build_signal_label_dataset(
         if not isinstance(feat, dict):
             feat = {}
 
-        # Core technicals from rule-engine features
-        x: dict[str, Any] = {
-            "close": _to_float(feat.get("close")),
-            "rsi_14": _to_float(feat.get("rsi_14")),
-            "htf_rsi": _to_float(feat.get("htf_rsi")),
-            "ema": _to_float(feat.get("ema")),
-            "ema_9": _to_float(feat.get("ema_9")),
-            "ema_21": _to_float(feat.get("ema_21")),
-            "ema_9_21_bias": _to_float(feat.get("ema_9_21_bias")),
-            "alligator_jaw": _to_float(feat.get("alligator_jaw")),
-            "alligator_teeth": _to_float(feat.get("alligator_teeth")),
-            "alligator_lips": _to_float(feat.get("alligator_lips")),
-            "alligator_trend_up": _to_float(feat.get("alligator_trend_up")),
-            "alligator_trend_down": _to_float(feat.get("alligator_trend_down")),
-            "macd": _to_float(feat.get("macd")),
-            "macd_signal": _to_float(feat.get("macd_signal")),
-            "vwap": _to_float(feat.get("vwap")),
-            "volume_ratio": _to_float(feat.get("volume_ratio")),
-            "atr": _to_float(feat.get("atr")),
-            "atr_avg": _to_float(feat.get("atr_avg")),
-            "atr_monthly": _to_float(feat.get("atr_monthly")),
-            "htf_ok_long": 1.0 if bool(feat.get("htf_ok_long")) else 0.0,
-            "htf_ok_short": 1.0 if bool(feat.get("htf_ok_short")) else 0.0,
-            "is_buy": 1.0 if str(action).upper() == "BUY" else 0.0,
-        }
-        x.update(x_time)
-
-        # Setup-type context (reason string from StrategySignal)
-        rs = (reason or "").strip().lower()
-        x["setup_long_pullback"] = 1.0 if rs == "long_rsi_macd_vwap_volume" else 0.0
-        x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
-        x["setup_crypto_macd_alligator_momo"] = 1.0 if rs == "crypto_macd_alligator_momo" else 0.0
-        x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
-        x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
-        x["setup_short_rsi_overbought_fade"] = 1.0 if rs == "short_rsi_overbought_fade" else 0.0
-        x["setup_short_bb_upper_fade"] = 1.0 if rs == "short_bb_upper_fade" else 0.0
-        x["setup_short_break_retest"] = 1.0 if rs == "short_break_retest" else 0.0
-
-        # News bundle features (stored in features["news"] by main tick)
-        news = feat.get("news") if isinstance(feat.get("news"), dict) else None
-        x.update(_news_features(news, now_ts=now_ts))
-
-        # TAAPI features (stored in features["taapi"])
-        taapi = feat.get("taapi") if isinstance(feat.get("taapi"), dict) else None
-        x.update(_taapi_features(taapi))
+        x = flatten_signal_features(
+            feat,
+            reason=str(reason or ""),
+            action=str(action or "BUY"),
+            anchor_ts=now_ts,
+        )
 
         # Target
         ret = float(ret_pct) if ret_pct is not None else 0.0
