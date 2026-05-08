@@ -110,7 +110,7 @@ jobs:
           PY
 
       - name: Upload equity symbols
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: equity-symbols-${{ github.run_id }}
           path: equity_symbols.json
@@ -169,7 +169,7 @@ jobs:
 
       - name: Upload crypto sim shard
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: sim-shard-crypto-${{ github.run_id }}
           path: |
@@ -261,7 +261,7 @@ jobs:
 
       - name: Upload equity sim shard
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: sim-shard-equity-${{ matrix.shard }}-${{ github.run_id }}
           path: |
@@ -381,7 +381,7 @@ jobs:
 
       - name: Upload sim dataset + models + reports
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: mock-backtest-sim-${{ github.run_id }}
           path: |
