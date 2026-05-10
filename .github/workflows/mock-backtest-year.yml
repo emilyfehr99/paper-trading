@@ -212,7 +212,7 @@ jobs:
         run: pip install -e .
 
       - name: Download equity symbols
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: equity-symbols-${{ github.run_id }}
 
@@ -305,7 +305,7 @@ jobs:
 
       - name: Download all sim shards
         if: always()
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: state/ledgers/shards
 
