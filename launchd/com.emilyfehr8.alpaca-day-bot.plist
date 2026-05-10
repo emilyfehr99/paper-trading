@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.emilyfehr8.alpaca-day-bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>/Users/emilyfehr8/CascadeProjects/alpaca-paper-day-bot/scripts/run_day_session_local.sh</string>
+    </array>
+
+    <!-- Weekdays at 08:25 local time (CT). Bot will wait for TRADE_START anyway. -->
+    <key>StartCalendarInterval</key>
+    <array>
+      <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>25</integer></dict>
+      <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>25</integer></dict>
+      <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>25</integer></dict>
+      <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>25</integer></dict>
+      <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>25</integer></dict>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/emilyfehr8/CascadeProjects/alpaca-paper-day-bot</string>
+
+    <!-- Logs -->
+    <key>StandardOutPath</key>
+    <string>/Users/emilyfehr8/CascadeProjects/alpaca-paper-day-bot/state/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/emilyfehr8/CascadeProjects/alpaca-paper-day-bot/state/logs/launchd.err.log</string>
+
+    <!-- KeepAlive will restart on transient crashes, but will not re-run after a clean exit. -->
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+
+    <!-- Avoid duplicates if it takes a while to exit. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+  </dict>
+</plist>
+
