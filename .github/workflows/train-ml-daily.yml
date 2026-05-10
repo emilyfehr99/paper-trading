@@ -44,13 +44,45 @@ jobs:
       - name: Install package
         run: pip install -e .
 
-      - name: Train model from ledger labels
+      - name: Backfill forward labels via yfinance (optional)
+        continue-on-error: true
         run: |
+          if [[ -f state/ledger.sqlite3 ]]; then
+            alpaca-backfill-forward-labels --db state/ledger.sqlite3 --limit 400 --min-age-minutes 15 || true
+          fi
+
+      - name: Backfill triple-barrier labels via yfinance (optional)
+        continue-on-error: true
+        run: |
+          if [[ -f state/ledger.sqlite3 ]]; then
+            alpaca-backfill-triple-barrier --db state/ledger.sqlite3 --limit 300 --min-age-minutes 15 --max-lookback-days 14 || true
+          fi
+
+      - name: Train models from ledger labels (long / short / legacy path)
+        run: |
+          set -e
+          mkdir -p state/models
+          python -m alpaca_day_bot.ml.train \
+            --db state/ledger.sqlite3 \
+            --out state/models/latest_buy.joblib \
+            --action BUY \
+            --min-horizon-minutes 15 \
+            --min-rows 10 \
+            --min-class-count 5
+          python -m alpaca_day_bot.ml.train \
+            --db state/ledger.sqlite3 \
+            --out state/models/latest_short.joblib \
+            --action SHORT \
+            --min-horizon-minutes 15 \
+            --min-rows 10 \
+            --min-class-count 5
           python -m alpaca_day_bot.ml.train \
             --db state/ledger.sqlite3 \
             --out state/models/latest.joblib \
+            --action BUY \
             --min-horizon-minutes 15 \
-            --min-rows 10
+            --min-rows 10 \
+            --min-class-count 5
 
       - name: Upload model artifact
         if: always()

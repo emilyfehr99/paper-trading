@@ -74,6 +74,8 @@ class V1RulesSignalEngine(BaseStrategy):
                 "macd_cross": False,
                 "above_vwap": False,
                 "volume_confirm": False,
+                "supertrend_ok": False,
+                "ichimoku_ok": False,
             },
             "buy_score": 0,
             "would_action": "HOLD",
@@ -85,7 +87,11 @@ class V1RulesSignalEngine(BaseStrategy):
 
         df = df_1m.copy()
         try:
-            df.index = pd.to_datetime(df.index, utc=True)
+            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+        except Exception:
+            pass
+        try:
+            df = df[~pd.isna(df.index)]
         except Exception:
             pass
         if hasattr(df.index, "duplicated"):
@@ -126,7 +132,11 @@ class V1RulesSignalEngine(BaseStrategy):
             return base
         htf = df_15m.copy()
         try:
-            htf.index = pd.to_datetime(htf.index, utc=True)
+            htf.index = pd.to_datetime(htf.index, utc=True, errors="coerce")
+        except Exception:
+            pass
+        try:
+            htf = htf[~pd.isna(htf.index)]
         except Exception:
             pass
         if hasattr(htf.index, "duplicated"):
@@ -134,11 +144,13 @@ class V1RulesSignalEngine(BaseStrategy):
         htf = htf.sort_index()
         base["bars_15m"] = int(len(htf))
 
-        if len(htf) < (self._htf_rsi_len + 2):
-            base["blocked"] = "htf_not_ready"
+        # Use a dynamic length if we have less than the target 14 bars (minimum 2 bars required for RSI)
+        rsi_len = min(int(self._htf_rsi_len), len(htf) - 1)
+        if rsi_len < 2:
+            base["blocked"] = "htf_too_short"
             return base
 
-        htf["rsi"] = ta.rsi(htf["close"], length=int(self._htf_rsi_len))
+        htf["rsi"] = ta.rsi(htf["close"], length=rsi_len)
         htf_last = htf.iloc[-1]
         if pd.isna(htf_last.get("rsi")):
             base["blocked"] = "htf_rsi_nan"
@@ -146,8 +158,13 @@ class V1RulesSignalEngine(BaseStrategy):
 
         htf_rsi_v = float(htf_last["rsi"])
         base["htf_rsi"] = htf_rsi_v
+        
+        # HTF Ceiling/Floor: Avoid vertical overextensions (tops/bottoms)
         if htf_rsi_v < float(self._htf_rsi_min):
-            base["blocked"] = "htf_bias_rsi"
+            base["blocked"] = "htf_bias_rsi_low"
+            return base
+        if htf_rsi_v > 80.0:
+            base["blocked"] = "htf_overextended_high"
             return base
 
         atr = float(last.get("atr")) if not pd.isna(last.get("atr")) else None
@@ -172,6 +189,7 @@ class V1RulesSignalEngine(BaseStrategy):
             base["blocked"] = "macd_not_ready"
             return base
         macd_bull_cross = (macd_now > macds_now) and (macd_prev <= macds_prev)
+        macd_bull = (macd_now > macds_now)
 
         vol_sma = last.get("volume_sma")
         if pd.isna(vol_sma) or float(vol_sma) <= 0:
@@ -187,18 +205,43 @@ class V1RulesSignalEngine(BaseStrategy):
         chk["rsi_pullback"] = bool(rsi_pullback)
         chk["above_ema"] = bool(above_ema)
         chk["macd_cross"] = bool(macd_bull_cross)
+        chk["macd_aligned"] = bool(macd_bull)
         chk["above_vwap"] = bool(above_vwap)
         chk["volume_confirm"] = bool(volume_confirm)
 
         score = sum(1 for v in chk.values() if v)
         base["buy_score"] = int(score)
 
+        # Match decide() mode logic
+        mode = self._macd_confirm_mode
+        if mode == "cross":
+            macd_ok = macd_bull_cross
+            macd_err = "macd_no_cross"
+        elif mode == "aligned":
+            macd_ok = macd_bull
+            macd_err = "macd_not_aligned"
+        else:
+            macd_ok = (macd_bull_cross or macd_bull)
+            macd_err = "macd_no_cross"
+
+        # Defensive Filters: Spread & ATR Smoothness
+        try:
+            bid = float(getattr(last, "bid", 0.0) or 0.0)
+            ask = float(getattr(last, "ask", 0.0) or 0.0)
+            if bid > 0 and ask > 0:
+                spread_pct = (ask - bid) / ask
+                if spread_pct > 0.001: # 0.1% Hard Cap
+                    base["blocked"] = "bad_spread"
+                    return base
+        except Exception:
+            pass
+
         if not rsi_pullback:
             base["blocked"] = "rsi_no_pullback"
         elif not above_ema:
             base["blocked"] = "below_ema"
-        elif not macd_bull_cross:
-            base["blocked"] = "macd_no_cross"
+        elif not macd_ok:
+            base["blocked"] = macd_err
         elif not above_vwap:
             base["blocked"] = "below_vwap"
         elif not volume_confirm:
@@ -239,7 +282,11 @@ class V1RulesSignalEngine(BaseStrategy):
         df = df_base.copy()
         # pandas-ta VWAP requires an ordered DatetimeIndex; enforce monotonic UTC index.
         try:
-            df.index = pd.to_datetime(df.index, utc=True)
+            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+        except Exception:
+            pass
+        try:
+            df = df[~pd.isna(df.index)]
         except Exception:
             pass
         if hasattr(df.index, "duplicated"):
@@ -290,6 +337,28 @@ class V1RulesSignalEngine(BaseStrategy):
         if adx is not None:
             df = pd.concat([df, adx], axis=1)
 
+        # NEW: SuperTrend (Trend Follower + Trailing Stop)
+        try:
+            st = ta.supertrend(df["high"], df["low"], df["close"], length=10, multiplier=3.0)
+            if st is not None:
+                df = pd.concat([df, st], axis=1)
+        except Exception:
+            pass
+
+        # NEW: MFI (Money Flow Index - RSI with Volume)
+        try:
+            df["mfi_14"] = ta.mfi(df["high"], df["low"], df["close"], df["volume"], length=14)
+        except Exception:
+            pass
+
+        # NEW: Ichimoku Cloud (Trend & Support/Resistance)
+        try:
+            ichi, _ = ta.ichimoku(df["high"], df["low"], df["close"])
+            if ichi is not None:
+                df = pd.concat([df, ichi], axis=1)
+        except Exception:
+            pass
+
         last = df.iloc[-1]
         # Guard against NaNs from warmup
         if (
@@ -302,16 +371,19 @@ class V1RulesSignalEngine(BaseStrategy):
             return None
 
         # Higher timeframe bias: 15m RSI must be > threshold (longs) or < max threshold (shorts)
-        if df_15m is None or getattr(df_15m, "empty", True) or len(df_15m) < (self._htf_rsi_len + 2):
+        # Adaptive warmup: use a shorter RSI length if we have less than 14 bars.
+        if df_15m is None or getattr(df_15m, "empty", True) or len(df_15m) < 3:
             return StrategySignal(symbol, "HOLD", "htf_not_ready")
         htf = df_15m.copy()
-        htf["rsi"] = ta.rsi(htf["close"], length=int(self._htf_rsi_len))
+        rsi_len = min(int(self._htf_rsi_len), len(htf) - 1)
+        htf["rsi"] = ta.rsi(htf["close"], length=rsi_len)
         htf_last = htf.iloc[-1]
         if pd.isna(htf_last.get("rsi")):
             return StrategySignal(symbol, "HOLD", "htf_bias_rsi")
         htf_rsi_v = float(htf_last["rsi"])
-        htf_ok_long = htf_rsi_v >= float(self._htf_rsi_min)
-        htf_ok_short = htf_rsi_v <= float(self._htf_rsi_max_short)
+        # HTF Ceiling/Floor: Avoid vertical overextensions (tops/bottoms)
+        htf_ok_long = (htf_rsi_v >= float(self._htf_rsi_min)) and (htf_rsi_v <= 80.0)
+        htf_ok_short = (htf_rsi_v <= float(self._htf_rsi_max_short)) and (htf_rsi_v >= 20.0)
 
         # Volatility regime guard: skip if ATR > k * average ATR.
         # IMPORTANT: When decisions are made on 15m bars, `atr_avg` warmup would take ~12.5h (50 * 15m).
@@ -368,12 +440,39 @@ class V1RulesSignalEngine(BaseStrategy):
         is_low_vol = bool(atr_ratio is not None and atr_ratio < 1.15)
         good_regime = bool(is_trend and is_low_vol)
 
+        # In practice, the HTF RSI floor can be overly strict (especially on strong-trend days).
+        # Loosen slightly in good regimes and in aggressive mode so we don't "no-trade" entire sessions.
+        try:
+            htf_floor = float(self._htf_rsi_min)
+            if good_regime:
+                htf_floor -= 5.0
+            if self._aggressive_mode:
+                htf_floor -= 5.0
+            htf_ok_long = htf_rsi_v >= float(htf_floor)
+        except Exception:
+            pass
+
+        # NEW: SuperTrend Filter (Long = 1, Short = -1)
+        st_dir = last.get("SUPERTd_10_3.0")
+        st_ok_long = bool(st_dir == 1)
+        st_ok_short = bool(st_dir == -1)
+
+        # NEW: Ichimoku Filter (Price above cloud for Longs)
+        span_a = last.get("ISA_9")
+        span_b = last.get("ISB_26")
+        ichi_ok_long = True
+        ichi_ok_short = True
+        if not pd.isna(span_a) and not pd.isna(span_b):
+            ichi_ok_long = float(last["close"]) > max(float(span_a), float(span_b))
+            ichi_ok_short = float(last["close"]) < min(float(span_a), float(span_b))
+
         # Core entry conditions
         rsi_v = float(last["rsi"])
         rsi_pb_max = float(self._rsi_pullback_max)
         # Slightly widen the pullback window only in good regimes.
         if good_regime:
-            rsi_pb_max = min(60.0, rsi_pb_max + 5.0)
+            # Trend days often never print "pullback" RSI values; widen a lot to avoid no-trade sessions.
+            rsi_pb_max = min(78.0, rsi_pb_max + 30.0)
         rsi_pullback = rsi_v <= rsi_pb_max
         above_ema = float(last["close"]) > float(last["ema_20"])
         below_ema = float(last["close"]) < float(last["ema_20"])
@@ -386,7 +485,7 @@ class V1RulesSignalEngine(BaseStrategy):
         macd_now = df[macd_col].iloc[-1]
         macds_now = df[macds_col].iloc[-1]
         macd_prev = df[macd_col].iloc[-2]
-        macds_prev = df[macds_col].iloc[-2]
+        macds_prev = df[macd_col].iloc[-2]
         if pd.isna(macd_now) or pd.isna(macds_now) or pd.isna(macd_prev) or pd.isna(macds_prev):
             return StrategySignal(symbol, "HOLD", "macd_not_ready")
         macd_bull_cross = (macd_now > macds_now) and (macd_prev <= macds_prev)
@@ -413,6 +512,8 @@ class V1RulesSignalEngine(BaseStrategy):
             "above_vwap": bool(above_vwap),
             "volume_confirm": bool(volume_confirm),
             "good_regime": bool(good_regime),
+            "st_ok_long": bool(st_ok_long),
+            "ichi_ok_long": bool(ichi_ok_long),
         }
         checks_short = {
             "htf_ok_short": bool(htf_ok_short),
@@ -423,6 +524,8 @@ class V1RulesSignalEngine(BaseStrategy):
             "below_vwap": bool(below_vwap),
             "volume_confirm": bool(volume_confirm),
             "good_regime": bool(good_regime),
+            "st_ok_short": bool(st_ok_short),
+            "ichi_ok_short": bool(ichi_ok_short),
         }
 
         # Extra short setup signals (so the SHORT model can learn which patterns work).
@@ -475,6 +578,7 @@ class V1RulesSignalEngine(BaseStrategy):
         features = {
             "close": float(last["close"]),
             "rsi_14": float(last["rsi"]),
+            "mfi_14": (float(last["mfi_14"]) if not pd.isna(last.get("mfi_14")) else None),
             "ema": float(last["ema_20"]),
             "ema_9": (None if pd.isna(last.get("ema_9")) else float(last.get("ema_9"))),
             "ema_21": (None if pd.isna(last.get("ema_21")) else float(last.get("ema_21"))),
@@ -530,6 +634,7 @@ class V1RulesSignalEngine(BaseStrategy):
             "rule_votes": {"long": checks_long, "short": checks_short},
             "indicators_used": [
                 "rsi_14",
+                "mfi_14",
                 "macd",
                 "macd_signal",
                 "alligator_jaw",
@@ -542,6 +647,8 @@ class V1RulesSignalEngine(BaseStrategy):
                 "ema_21",
                 "htf_rsi",
                 "atr",
+                "supertrend",
+                "ichimoku",
             ],
         }
 
@@ -556,8 +663,23 @@ class V1RulesSignalEngine(BaseStrategy):
         else:
             # aligned_good_regime_else_cross
             macd_ok_long = (macd_bull_cross or macd_bull) if good_regime else macd_bull_cross
+        # Defensive Filters: Spread check (max 0.1% for real-money simulation)
+        try:
+            bid = float(getattr(last, "bid", 0.0) or 0.0)
+            ask = float(getattr(last, "ask", 0.0) or 0.0)
+            if bid > 0 and ask > 0:
+                spread_pct = (ask - bid) / ask
+                if spread_pct > 0.001: 
+                    return StrategySignal(symbol, "HOLD", "bad_spread", features=features)
+        except Exception:
+            pass
+
         vwap_ok_long = above_vwap if not self._aggressive_mode else True
-        vol_ok_long = volume_confirm if not self._aggressive_mode else (volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80))
+        if not self._aggressive_mode:
+            # In good regimes, allow slightly sub-average volume so we don't stall all day on quiet tape.
+            vol_ok_long = volume_confirm or (good_regime and volume_ratio >= max(0.85, float(self._volume_confirm_mult) * 0.85))
+        else:
+            vol_ok_long = volume_ratio >= max(0.80, float(self._volume_confirm_mult) * 0.80)
 
         # Crypto-only momentum setup (MACD-first) — does not require RSI pullback.
         # This is a different setup class (trend continuation), not a relaxation of the pullback gate.
@@ -575,9 +697,20 @@ class V1RulesSignalEngine(BaseStrategy):
             if htf_ok_long and alligator_up and rsi_ok_momo and above_ema and macd_bull and above_vwap and vol_ok_momo:
                 return StrategySignal(symbol, "BUY", "crypto_macd_alligator_momo", features=features)
 
-        # Setup A: pullback entry (original)
-        if htf_ok_long and rsi_pullback and above_ema and macd_ok_long and vwap_ok_long and vol_ok_long:
+        # Setup A: pullback entry (original) + NEW Filters
+        if htf_ok_long and rsi_pullback and above_ema and macd_ok_long and vwap_ok_long and vol_ok_long and st_ok_long and ichi_ok_long:
             return StrategySignal(symbol, "BUY", "long_rsi_macd_vwap_volume", features=features)
+
+        # Setup A2: trend continuation (frequency booster).
+        # When regime is clearly trending + low vol, requiring an RSI pullback is often too strict
+        # and can lead to "no trades" days. This setup is still MACD/EMA/VWAP gated.
+        # NEW: Added MFI filter to ensure volume-based trend strength.
+        mfi_v = features.get("mfi_14")
+        mfi_ok = bool(mfi_v is not None and 35.0 <= mfi_v <= 85.0)
+        
+        if (not self._crypto_momentum_setup) and htf_ok_long and good_regime and above_ema and macd_bull and vwap_ok_long and vol_ok_long and st_ok_long and mfi_ok:
+            if float(last["rsi"]) <= 78.0:
+                return StrategySignal(symbol, "BUY", "long_trend_continuation", features=features)
 
         # Setup B (aggressive): momentum continuation
         if self._aggressive_mode:

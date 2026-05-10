@@ -107,6 +107,26 @@ class Ledger:
               FOREIGN KEY (signal_id) REFERENCES signals(id)
             );
 
+            -- Executed-trade reviews: realized outcomes with entry signal context.
+            -- This is used for "learn from failures" introspection and optional ML feature enrichment.
+            CREATE TABLE IF NOT EXISTS executed_trade_reviews (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts_close TEXT NOT NULL,
+              symbol TEXT NOT NULL,
+              realized_pnl_usd REAL NOT NULL,
+              qty_closed REAL NOT NULL,
+              entry_ts TEXT,
+              exit_ts TEXT,
+              entry_avg_price REAL,
+              exit_price REAL,
+              signal_id INTEGER,
+              signal_reason TEXT,
+              tags_json TEXT,
+              features_json TEXT,
+              raw_json TEXT NOT NULL,
+              FOREIGN KEY (signal_id) REFERENCES signals(id)
+            );
+
             CREATE TABLE IF NOT EXISTS virtual_option_trades (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               ts_open TEXT NOT NULL,
@@ -366,6 +386,92 @@ class Ledger:
             )
             self._conn.commit()
             return int(cur.lastrowid)
+
+    def latest_signal_before(self, *, symbol: str, ts: datetime) -> dict[str, Any] | None:
+        """Return latest signal row for symbol with signals.ts <= ts."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+            SELECT id, ts, action, reason, features_json
+            FROM signals
+            WHERE symbol = ? AND ts <= ?
+            ORDER BY ts DESC
+            LIMIT 1
+                """,
+                (symbol, ts.isoformat()),
+            ).fetchone()
+        if not row:
+            return None
+        sid, ts_s, action, reason, feat_json = row
+        feat = None
+        try:
+            feat = json.loads(feat_json) if feat_json else None
+        except Exception:
+            feat = None
+        return {
+            "id": int(sid),
+            "ts": str(ts_s),
+            "action": str(action),
+            "reason": str(reason),
+            "features": feat,
+        }
+
+    def record_executed_trade_review(
+        self,
+        *,
+        ts_close: datetime,
+        symbol: str,
+        realized_pnl_usd: float,
+        qty_closed: float,
+        entry_ts: datetime | None,
+        exit_ts: datetime | None,
+        entry_avg_price: float | None,
+        exit_price: float | None,
+        signal_id: int | None,
+        signal_reason: str | None,
+        tags: dict[str, Any] | None,
+        features: dict[str, Any] | None,
+        raw: dict[str, Any],
+    ) -> None:
+        row = {
+            "ts_close": ts_close.isoformat(),
+            "symbol": symbol,
+            "realized_pnl_usd": float(realized_pnl_usd),
+            "qty_closed": float(qty_closed),
+            "entry_ts": (entry_ts.isoformat() if entry_ts else None),
+            "exit_ts": (exit_ts.isoformat() if exit_ts else None),
+            "entry_avg_price": (float(entry_avg_price) if entry_avg_price is not None else None),
+            "exit_price": (float(exit_price) if exit_price is not None else None),
+            "signal_id": (int(signal_id) if signal_id is not None else None),
+            "signal_reason": (str(signal_reason) if signal_reason else None),
+            "tags": (tags or {}),
+            "features": (features or {}),
+        }
+        with self._lock:
+            self._conn.execute(
+                """
+            INSERT INTO executed_trade_reviews
+              (ts_close, symbol, realized_pnl_usd, qty_closed, entry_ts, exit_ts, entry_avg_price, exit_price,
+               signal_id, signal_reason, tags_json, features_json, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ts_close.isoformat(),
+                    symbol,
+                    float(realized_pnl_usd),
+                    float(qty_closed),
+                    (entry_ts.isoformat() if entry_ts else None),
+                    (exit_ts.isoformat() if exit_ts else None),
+                    (float(entry_avg_price) if entry_avg_price is not None else None),
+                    (float(exit_price) if exit_price is not None else None),
+                    (int(signal_id) if signal_id is not None else None),
+                    (str(signal_reason) if signal_reason else None),
+                    json.dumps(tags or {}, default=str),
+                    (None if features is None else json.dumps(features, default=str)),
+                    json.dumps(raw or row, default=str),
+                ),
+            )
+            self._conn.commit()
 
     def open_virtual_option_trade(
         self,

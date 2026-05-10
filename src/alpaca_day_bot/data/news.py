@@ -15,6 +15,30 @@ _ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
 _GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 _TICKERTICK_FEED = "https://api.tickertick.com/feed"
 
+# AlphaVantage free tier has strict per-day + per-minute throttles. Once we detect a quota/rate
+# message, disable further AV calls for a cooldown window to avoid spamming warnings and wasting time.
+_AV_DISABLED_UNTIL: datetime | None = None
+_AV_NOTE_LOGGED_AT: datetime | None = None
+
+
+def _av_is_disabled(now_utc: datetime) -> bool:
+    global _AV_DISABLED_UNTIL
+    if _AV_DISABLED_UNTIL is None:
+        return False
+    try:
+        return now_utc < _AV_DISABLED_UNTIL
+    except Exception:
+        _AV_DISABLED_UNTIL = None
+        return False
+
+
+def _av_disable_for_hours(now_utc: datetime, *, hours: float) -> None:
+    global _AV_DISABLED_UNTIL
+    try:
+        _AV_DISABLED_UNTIL = now_utc + timedelta(hours=float(hours))
+    except Exception:
+        _AV_DISABLED_UNTIL = None
+
 
 def _normalize_gate_mode(mode: str) -> str:
     m = (mode or "log_only").strip().lower()
@@ -117,6 +141,17 @@ def fetch_alphavantage_news(*, api_key: str, symbol: str, limit: int) -> dict[st
     if not key:
         return {"ok": False, "error": "missing_api_key", "provider": "alphavantage", "symbol": sym, "count": 0, "articles": []}
 
+    now_utc = datetime.now(tz=timezone.utc)
+    if _av_is_disabled(now_utc):
+        return {
+            "ok": False,
+            "error": "alphavantage_disabled_due_to_quota",
+            "provider": "alphavantage",
+            "symbol": sym,
+            "count": 0,
+            "articles": [],
+        }
+
     lim = max(1, min(int(limit), 50))
     params = urllib.parse.urlencode(
         {
@@ -143,10 +178,24 @@ def fetch_alphavantage_news(*, api_key: str, symbol: str, limit: int) -> dict[st
 
     note = data.get("Note") or data.get("Information")
     if note:
-        log.warning("alphavantage_news_note symbol=%s note=%s", sym, str(note)[:160])
+        note_s = str(note)
+        # Typical messages:
+        # - "standard API rate limit is 25 requests per day"
+        # - "Please consider spreading out your free API requests..." (per-minute throttling)
+        low = note_s.lower()
+        # Longer cooldown for daily quota, short cooldown for per-minute throttles.
+        cd_hours = 12.0 if ("25 requests per day" in low or "requests per day" in low) else 0.25
+        _av_disable_for_hours(now_utc, hours=cd_hours)
+        global _AV_NOTE_LOGGED_AT
+        try:
+            if _AV_NOTE_LOGGED_AT is None or (now_utc - _AV_NOTE_LOGGED_AT).total_seconds() > 600:
+                log.warning("alphavantage_news_note symbol=%s note=%s", sym, note_s[:160])
+                _AV_NOTE_LOGGED_AT = now_utc
+        except Exception:
+            log.warning("alphavantage_news_note symbol=%s note=%s", sym, note_s[:160])
         return {
             "ok": False,
-            "error": str(note)[:300],
+            "error": note_s[:300],
             "provider": "alphavantage",
             "symbol": sym,
             "count": 0,

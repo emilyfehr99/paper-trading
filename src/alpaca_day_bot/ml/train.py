@@ -37,9 +37,40 @@ from sklearn.ensemble import (
     RandomForestClassifier,
 )
 
-from alpaca_day_bot.ml.dataset import build_signal_label_dataset
+from alpaca_day_bot.ml.dataset import (
+    FEATURE_VECTOR_ID,
+    LIVE_INFERENCE_PATH_SIGNAL_FEATURES,
+    build_signal_label_dataset,
+)
 from alpaca_day_bot.ml.executed_dataset import build_executed_trade_dataset
 from alpaca_day_bot.ml.sim_dataset import build_sim_trade_dataset
+
+
+def _inference_meta(ds_kind: str) -> dict:
+    """Stable fields for JSON + joblib meta: how labels were built and how live inference must run."""
+    dks = str(ds_kind)
+    parts = [
+        f"dataset_kind={dks!r}.",
+        "Rows use ml.dataset.flatten_signal_features (dataset, sim, executed, infer share one builder).",
+    ]
+    if dks.startswith("executed"):
+        parts.append(
+            "Executed: labels from realized round trips; X is nearest prior signal features_json "
+            "(aligned with live inference; no exec_* columns)."
+        )
+    elif dks == "sim_trades":
+        parts.append("Sim: labels from sim_trades joined to sim_signals.")
+    else:
+        parts.append("Signals: triple_barrier_labels preferred, else forward_return_labels.")
+    parts.append(
+        "Live: live_inference_path must be signal_features; pass ts or signal_ts when possible "
+        f"(else UTC now anchors time/news). feature_vector_id={FEATURE_VECTOR_ID!r}."
+    )
+    return {
+        "feature_vector_id": FEATURE_VECTOR_ID,
+        "live_inference_path": LIVE_INFERENCE_PATH_SIGNAL_FEATURES,
+        "dataset_kind_description": " ".join(parts),
+    }
 
 
 @dataclass(frozen=True)
@@ -168,18 +199,36 @@ def _clip_proba_1d(p: np.ndarray) -> np.ndarray:
     return np.clip(x, eps, 1.0 - eps)
 
 
+def _median_imputer() -> SimpleImputer:
+    """Pandas matrix output so downstream steps (especially LGBM) see stable feature names."""
+    imputer = SimpleImputer(strategy="median")
+    imputer.set_output(transform="pandas")
+    return imputer
+
+
+def _frame_for_sklearn_classifier(X: pd.DataFrame | np.ndarray, *, feature_columns: list[str]) -> pd.DataFrame:
+    """Align to training columns as float64 DataFrame for Pipeline / CalibratedClassifierCV."""
+    if isinstance(X, pd.DataFrame):
+        return X.reindex(columns=list(feature_columns), fill_value=np.nan).astype(np.float64, copy=False)
+    arr = np.ascontiguousarray(np.asarray(X, dtype=np.float64, order="C"))
+    return pd.DataFrame(arr, columns=list(feature_columns), copy=False)
+
+
 def _fit_calibrated_pipeline(
     pipe: Pipeline,
     X,
     y,
     *,
+    feature_columns: list[str],
     cv_n: int,
     cal_method: str,
 ) -> Pipeline | CalibratedClassifierCV:
+    X_fit = _frame_for_sklearn_classifier(X, feature_columns=feature_columns)
+    y_fit = np.asarray(y)
     p = clone(pipe)
     if cv_n >= 2:
         try:
-            n_fit = int(len(X))
+            n_fit = int(len(X_fit))
         except Exception:
             n_fit = 0
         # Fewer disjoint calibrators when n is modest — less variance than a large ensemble.
@@ -190,11 +239,10 @@ def _fit_calibrated_pipeline(
             method=str(cal_method),
             cv=cv_obj,
             ensemble=cal_ensemble,
-            n_jobs=1,
         )
-        cal.fit(X, y)
+        cal.fit(X_fit, y_fit)
         return cal
-    p.fit(X, y)
+    p.fit(X_fit, y_fit)
     return p
 
 
@@ -300,6 +348,7 @@ def train_and_save(
             "n_labeled": int(len(X)),
             "min_required": int(min_rows),
             "dataset_kind": ds_kind,
+            **_inference_meta(ds_kind),
             "action": act,
             "target_mode": tm,
         }
@@ -330,6 +379,7 @@ def train_and_save(
                 "n_neg": int(n_neg),
                 "min_class_count": int(min_class_count),
                 "dataset_kind": ds_kind,
+                **_inference_meta(ds_kind),
                 "action": act,
                 "target_mode": tm,
             }
@@ -349,6 +399,7 @@ def train_and_save(
                 "n_labeled": int(len(X)),
                 "min_required": int(min_rows),
                 "dataset_kind": ds_kind,
+                **_inference_meta(ds_kind),
                 "action": act,
                 "target_mode": tm,
             }
@@ -365,6 +416,7 @@ def train_and_save(
                 "skip_reason": "regression_near_constant_target",
                 "n_labeled": int(len(X)),
                 "dataset_kind": ds_kind,
+                **_inference_meta(ds_kind),
                 "action": act,
                 "target_mode": tm,
             }
@@ -439,6 +491,7 @@ def train_and_save(
             "n_features": int(X_train.shape[1]),
             "min_required": int(min_rows),
             "dataset_kind": ds_kind,
+            **_inference_meta(ds_kind),
             "action": act,
             "target_mode": tm,
             "dropped_constant_features": dropped_var_cols,
@@ -467,7 +520,7 @@ def train_and_save(
             }
         reg = Pipeline(
             steps=[
-                ("impute", SimpleImputer(strategy="median")),
+                ("impute", _median_imputer()),
                 ("clf", HistGradientBoostingRegressor(**reg_kw)),
             ]
         )
@@ -549,6 +602,7 @@ def train_and_save(
             "min_horizon_minutes": float(min_horizon_minutes),
             "provider": "hist_gbr",
             "dataset_kind": ds_kind,
+            **_inference_meta(ds_kind),
             "action": act,
             "target_mode": tm,
             "min_edge_bps": float(min_edge_bps),
@@ -596,6 +650,7 @@ def train_and_save(
                     "skip_reason": "test_set_single_class",
                     "n_test": int(len(y_test)),
                     "dataset_kind": ds_kind,
+                    **_inference_meta(ds_kind),
                     "action": act,
                     "target_mode": tm,
                     "dropped_constant_features": dropped_var_cols,
@@ -614,14 +669,17 @@ def train_and_save(
     if len(yuniq) < 2:
         const = int(list(yuniq)[0]) if yuniq else 0
         dummy = DummyClassifier(strategy="constant", constant=const)
-        dummy.fit(X_train, y_train)
+        _dfc = list(X_train.columns)
+        X_train_fit = _frame_for_sklearn_classifier(X_train, feature_columns=_dfc)
+        X_test_fit = _frame_for_sklearn_classifier(X_test, feature_columns=_dfc)
+        dummy.fit(X_train_fit, y_train)
         provider = "dummy"
         model = dummy
         metrics = TrainMetrics(
             n=int(len(y_test)),
             pos_rate=float(np.mean(y_test)) if len(y_test) else float(const),
             auc=None,
-            acc=float(accuracy_score(y_test, (dummy.predict_proba(X_test)[:, 1] >= 0.5).astype(int)))
+            acc=float(accuracy_score(y_test, (dummy.predict_proba(X_test_fit)[:, 1] >= 0.5).astype(int)))
             if len(y_test)
             else 1.0,
         )
@@ -631,6 +689,7 @@ def train_and_save(
             "min_horizon_minutes": float(min_horizon_minutes),
             "provider": provider,
             "dataset_kind": ds_kind,
+            **_inference_meta(ds_kind),
             "action": act,
             "target_mode": tm,
             "task": "classification",
@@ -648,19 +707,18 @@ def train_and_save(
         return payload
 
     # ---- Unfitted classifier templates (clone + fit per stage) ----
+    feat_cols = list(X_train.columns)
     logreg = Pipeline(
         steps=[
-            ("impute", SimpleImputer(strategy="median")),
+            ("impute", _median_imputer()),
             ("scale", StandardScaler()),
             (
                 "clf",
                 LogisticRegression(
                     max_iter=3000,
                     tol=1e-4,
-                    n_jobs=1,
                     class_weight="balanced",
                     C=0.25,
-                    penalty="l2",
                     solver="lbfgs",
                 ),
             ),
@@ -669,7 +727,7 @@ def train_and_save(
 
     rf = Pipeline(
         steps=[
-            ("impute", SimpleImputer(strategy="median")),
+            ("impute", _median_imputer()),
             (
                 "clf",
                 RandomForestClassifier(
@@ -693,7 +751,7 @@ def train_and_save(
 
         lgbm_pipe = Pipeline(
             steps=[
-                ("impute", SimpleImputer(strategy="median")),
+                ("impute", _median_imputer()),
                 (
                     "clf",
                     lgb.LGBMClassifier(
@@ -738,7 +796,7 @@ def train_and_save(
         }
     hgb_clf = Pipeline(
         steps=[
-            ("impute", SimpleImputer(strategy="median")),
+            ("impute", _median_imputer()),
             ("clf", HistGradientBoostingClassifier(**hgb_params)),
         ]
     )
@@ -810,19 +868,28 @@ def train_and_save(
 
     cv_src = _cv_from_y_series(y_tr_src) if use_inner else cv_full
 
-    base_model = _fit_calibrated_pipeline(logreg, X_tr_src, y_tr_src, cv_n=cv_src, cal_method=cal_method)
-    rf_model = _fit_calibrated_pipeline(rf, X_tr_src, y_tr_src, cv_n=cv_src, cal_method=cal_method)
+    base_model = _fit_calibrated_pipeline(
+        logreg, X_tr_src, y_tr_src, feature_columns=feat_cols, cv_n=cv_src, cal_method=cal_method
+    )
+    rf_model = _fit_calibrated_pipeline(
+        rf, X_tr_src, y_tr_src, feature_columns=feat_cols, cv_n=cv_src, cal_method=cal_method
+    )
     lgbm_model_f = (
-        _fit_calibrated_pipeline(lgbm_pipe, X_tr_src, y_tr_src, cv_n=cv_src, cal_method=cal_method)
+        _fit_calibrated_pipeline(
+            lgbm_pipe, X_tr_src, y_tr_src, feature_columns=feat_cols, cv_n=cv_src, cal_method=cal_method
+        )
         if lgbm_pipe is not None
         else None
     )
-    hgb_model = _fit_calibrated_pipeline(hgb_clf, X_tr_src, y_tr_src, cv_n=cv_src, cal_method=cal_method)
+    hgb_model = _fit_calibrated_pipeline(
+        hgb_clf, X_tr_src, y_tr_src, feature_columns=feat_cols, cv_n=cv_src, cal_method=cal_method
+    )
 
     def eval_model(m, Xev=None, yev=None):
         Xh = X_test if Xev is None else Xev
         yh = y_test if yev is None else yev
-        proba = _clip_proba_1d(m.predict_proba(Xh)[:, 1])
+        Xh_fit = _frame_for_sklearn_classifier(Xh, feature_columns=feat_cols)
+        proba = _clip_proba_1d(m.predict_proba(Xh_fit)[:, 1])
         pred = (proba >= 0.5).astype(int)
         tm = TrainMetrics(
             n=int(len(yh)),
@@ -941,7 +1008,9 @@ def train_and_save(
         if lgbm_pipe is not None:
             templates["lgbm"] = lgbm_pipe
         winner = str(best[0])
-        model = _fit_calibrated_pipeline(templates[winner], X_train, y_train, cv_n=cv_full, cal_method=cal_method)
+        model = _fit_calibrated_pipeline(
+            templates[winner], X_train, y_train, feature_columns=feat_cols, cv_n=cv_full, cal_method=cal_method
+        )
         provider = winner
         metrics, extra_metrics, proba_best = eval_model(model)
     else:
@@ -970,7 +1039,7 @@ def train_and_save(
         }
 
     # Threshold sweep on TRAIN scores only (avoids optimistic threshold fit on the same test used for AUC).
-    proba_tr = _clip_proba_1d(model.predict_proba(X_train)[:, 1])
+    proba_tr = _clip_proba_1d(model.predict_proba(_frame_for_sklearn_classifier(X_train, feature_columns=feat_cols))[:, 1])
     best_thr = 0.55
     best_f1_tr = -1.0
     best_thr_precision_tr = 0.0
@@ -1096,6 +1165,7 @@ def train_and_save(
         "min_horizon_minutes": float(min_horizon_minutes),
         "provider": provider,
         "dataset_kind": ds_kind,
+        **_inference_meta(ds_kind),
         "action": act,
         "target_mode": tm,
         "min_edge_bps": float(min_edge_bps),

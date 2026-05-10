@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from alpaca_day_bot.ml.dataset import DatasetResult, _news_features, _parse_iso_dt, _taapi_features, _to_float
+from alpaca_day_bot.ml.dataset import DatasetResult, _parse_iso_dt, _to_float, flatten_signal_features
 from alpaca_day_bot.ml.targets import (
     beat_fee_binary,
     binary_win,
@@ -67,12 +67,6 @@ def build_sim_trade_dataset(
         ts = _parse_iso_dt(ts_s) or datetime.now(tz=timezone.utc)
         now_ts = ts
 
-        x_time = {
-            "hour_utc": float(ts.hour),
-            "minute_utc": float(ts.minute),
-            "dow_utc": float(ts.weekday()),
-        }
-
         feat: dict[str, Any] = {}
         if feat_json and isinstance(feat_json, str):
             try:
@@ -82,46 +76,12 @@ def build_sim_trade_dataset(
         if not isinstance(feat, dict):
             feat = {}
 
-        x: dict[str, Any] = {
-            "close": _to_float(feat.get("close")),
-            "rsi_14": _to_float(feat.get("rsi_14")),
-            "htf_rsi": _to_float(feat.get("htf_rsi")),
-            "ema": _to_float(feat.get("ema")),
-            "ema_9": _to_float(feat.get("ema_9")),
-            "ema_21": _to_float(feat.get("ema_21")),
-            "ema_9_21_bias": _to_float(feat.get("ema_9_21_bias")),
-            "alligator_jaw": _to_float(feat.get("alligator_jaw")),
-            "alligator_teeth": _to_float(feat.get("alligator_teeth")),
-            "alligator_lips": _to_float(feat.get("alligator_lips")),
-            "alligator_trend_up": _to_float(feat.get("alligator_trend_up")),
-            "alligator_trend_down": _to_float(feat.get("alligator_trend_down")),
-            "macd": _to_float(feat.get("macd")),
-            "macd_signal": _to_float(feat.get("macd_signal")),
-            "vwap": _to_float(feat.get("vwap")),
-            "volume_ratio": _to_float(feat.get("volume_ratio")),
-            "atr": _to_float(feat.get("atr")),
-            "atr_avg": _to_float(feat.get("atr_avg")),
-            "atr_monthly": _to_float(feat.get("atr_monthly")),
-            "htf_ok_long": 1.0 if bool(feat.get("htf_ok_long")) else 0.0,
-            "htf_ok_short": 1.0 if bool(feat.get("htf_ok_short")) else 0.0,
-            "is_buy": 1.0 if str(action).upper() == "BUY" else 0.0,
-        }
-        x.update(x_time)
-
-        rs = (reason or "").strip().lower()
-        x["setup_long_pullback"] = 1.0 if rs == "long_rsi_macd_vwap_volume" else 0.0
-        x["setup_long_momo"] = 1.0 if rs == "long_momo" else 0.0
-        x["setup_short_pullback"] = 1.0 if rs == "short_rsi_macd_vwap_volume" else 0.0
-        x["setup_short_momo"] = 1.0 if rs == "short_momo" else 0.0
-        x["setup_short_rsi_overbought_fade"] = 1.0 if rs == "short_rsi_overbought_fade" else 0.0
-        x["setup_short_bb_upper_fade"] = 1.0 if rs == "short_bb_upper_fade" else 0.0
-        x["setup_short_break_retest"] = 1.0 if rs == "short_break_retest" else 0.0
-
-        news = feat.get("news") if isinstance(feat.get("news"), dict) else None
-        x.update(_news_features(news, now_ts=now_ts))
-
-        taapi = feat.get("taapi") if isinstance(feat.get("taapi"), dict) else None
-        x.update(_taapi_features(taapi))
+        x = flatten_signal_features(
+            feat,
+            reason=str(reason or ""),
+            action=str(action or "BUY"),
+            anchor_ts=now_ts,
+        )
 
         try:
             pnl_v = float(pnl) if pnl is not None else 0.0

@@ -56,6 +56,11 @@ class RiskManager:
         elif self._start_equity is None:
             self._start_equity = equity
 
+    def force_set_start_equity(self, trading_date: date, equity: float) -> None:
+        """Force-reset baseline equity for the current trading day (manual session reset)."""
+        self._trading_day = trading_date
+        self._start_equity = float(equity)
+
     def rehydrate_from_ledger(self, ledger: Ledger, trading_date: date, tz: ZoneInfo) -> None:
         """Restore same-day trade count / cooldowns from SQLite (GitHub Actions ticks)."""
         stats = ledger.submitted_entry_stats_for_trading_date(trading_date, tz)
@@ -93,13 +98,17 @@ class RiskManager:
         symbol: str,
         equity: float,
         gross_exposure_usd: float,
-        open_positions: int,
+        open_position_symbols: set[str],
         now_utc: datetime,
         trading_date: date,
         price: float,
         stop_distance: float,
     ) -> RiskDecision:
         self.reset_day_if_needed(trading_date, equity)
+
+        # Normalize symbol for comparison (remove slashes for Alpaca matching)
+        sym_clean = (symbol or "").strip().upper().replace("/", "")
+        open_syms_clean = {s.strip().upper().replace("/", "") for s in open_position_symbols}
 
         if self.daily_loss_breached(equity):
             return RiskDecision(False, "daily_loss_limit")
@@ -110,7 +119,10 @@ class RiskManager:
         if self._max_trades_per_day > 0 and self._trades_today >= self._max_trades_per_day:
             return RiskDecision(False, "max_trades_per_day")
 
-        if self._max_positions > 0 and open_positions >= self._max_positions:
+        if sym_clean in open_syms_clean:
+            return RiskDecision(False, "already_in_position")
+
+        if self._max_positions > 0 and len(open_syms_clean) >= self._max_positions:
             return RiskDecision(False, "max_positions")
 
         if not self.can_trade_symbol(symbol, now_utc):

@@ -65,6 +65,86 @@ log = logging.getLogger("alpaca_day_bot")
 _LIVE_EQUITY_ANCHOR: float | None = None
 
 
+class _RealizedPnlTracker:
+    """
+    Long-only realized P&L tracker from fill events.
+    Tracks (qty, avg_entry_price) per symbol; when a SELL fill closes the position (qty->0),
+    returns the realized P&L for that round trip.
+    """
+
+    def __init__(self) -> None:
+        self._qty: dict[str, float] = {}
+        self._avg: dict[str, float] = {}
+
+    def seed_position(self, *, symbol: str, qty: float, avg_entry_price: float) -> None:
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return
+        if qty <= 0 or avg_entry_price <= 0:
+            return
+        self._qty[sym] = float(qty)
+        self._avg[sym] = float(avg_entry_price)
+
+    def on_fill(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        qty: float,
+        avg_px: float,
+        ts: datetime | None = None,
+    ) -> dict | None:
+        sym = (symbol or "").strip().upper()
+        if not sym or qty <= 0 or avg_px <= 0:
+            return None
+        s = (side or "").strip().lower()
+
+        q0 = float(self._qty.get(sym, 0.0) or 0.0)
+        a0 = float(self._avg.get(sym, 0.0) or 0.0)
+
+        if s == "buy":
+            q1 = q0 + qty
+            a1 = (a0 * q0 + avg_px * qty) / q1 if q1 > 1e-12 else avg_px
+            self._qty[sym] = q1
+            self._avg[sym] = a1
+            return None
+
+        if s == "sell":
+            # Long-only: sells reduce long qty.
+            sell_qty = min(qty, q0) if q0 > 0 else 0.0
+            realized = (avg_px - a0) * sell_qty if sell_qty > 0 else 0.0
+            q1 = q0 - sell_qty
+            if q1 <= 1e-9:
+                self._qty.pop(sym, None)
+                self._avg.pop(sym, None)
+                return {
+                    "symbol": sym,
+                    "qty_closed": float(sell_qty),
+                    "entry_avg_price": float(a0) if q0 > 0 else None,
+                    "exit_price": float(avg_px),
+                    "realized_pnl_usd": float(realized),
+                    "exit_ts": ts,
+                }
+            self._qty[sym] = q1
+            return None
+
+        return None
+
+
+def _macos_notify(title: str, body: str) -> None:
+    try:
+        import subprocess
+        log.info(f"sending_macos_notification title='{title}' body='{body}'")
+        subprocess.run(
+            ["osascript", "-e", f'display notification \"{body}\" with title \"{title}\"'],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        log.warning(f"macos_notification_failed err={e}")
+
+
 def _effective_equity(settings, equity_live: float) -> float:
     """
     If EQUITY_OVERRIDE_USD is set (>0), report equity as:
@@ -389,6 +469,17 @@ def _run_in_window_trading_cycle(
         # Transient network / Alpaca REST hiccups should not crash the whole bot loop.
         log.warning("account_snapshot_failed err=%s", e)
         return last_signal_scan_ts
+
+    # If the user changes EQUITY_OVERRIDE_USD during the day (e.g. $500 -> $1000),
+    # the RiskManager's daily baseline may still reflect the *old* effective equity,
+    # which can incorrectly trip `daily_profit_target` (it thinks equity jumped).
+    # Keep the daily baseline aligned to the current override when override is set.
+    try:
+        eq_override = float(getattr(settings, "equity_override_usd", 0.0) or 0.0)
+        if eq_override > 0:
+            risk.force_set_start_equity(market_day, eq_override)
+    except Exception:
+        pass
 
     # Load ML bundles early so entries/exits can use them (separate BUY vs SHORT models).
     ml_bundle_buy = None
@@ -1077,14 +1168,57 @@ def _run_in_window_trading_cycle(
             symbol=sym,
             equity=equity,
             gross_exposure_usd=gross,
-            open_positions=open_positions,
+            open_position_symbols=executor.open_position_symbols(),
             now_utc=t0,
             trading_date=market_day,
             price=last_close,
             stop_distance=stop_dist,
         )
         if not rd.allow:
+            # Important for debugging: risk blocks used to be silent (0 order_intents even with BUY signals).
+            # Record a non-submitted intent so we can see *why* no trades happened today.
+            try:
+                ledger.record_order_intent(
+                    ts=t0,
+                    symbol=sym,
+                    side=("buy" if action == "BUY" else "sell"),
+                    notional_usd=float(rd.notional_usd or 0.0),
+                    stop_price=stop_price,
+                    take_profit_price=tp_price,
+                    client_order_id=None,
+                    alpaca_order_id=None,
+                    submitted=False,
+                    reason=f"risk_block:{rd.reason}",
+                    extra={
+                        "action": action,
+                        "equity_effective": float(equity),
+                        "gross_exposure_usd": float(gross),
+                        "open_positions": int(open_positions),
+                        "max_gross_exposure_pct": float(getattr(settings, "max_gross_exposure_pct", 0.0) or 0.0),
+                        "max_positions": int(getattr(settings, "max_positions", 0) or 0),
+                        "max_trades_per_day": int(getattr(settings, "max_trades_per_day", 0) or 0),
+                        "per_symbol_cooldown_s": float(getattr(settings, "per_symbol_cooldown_s", 0.0) or 0.0),
+                    },
+                )
+            except Exception:
+                pass
             return
+
+        # Minimum expected profit in USD (at the configured TP) to avoid tiny 1-share trades.
+        # IMPORTANT: if it doesn't meet the minimum, we fail fast without recording an order_intent
+        # to avoid extra churn/noise (and reduce wasted work).
+        try:
+            min_p = float(getattr(settings, "min_expected_profit_usd", 0.0) or 0.0)
+        except Exception:
+            min_p = 0.0
+        if min_p > 0:
+            try:
+                qty_int_preview = int(float(rd.qty or 0.0))
+                exp_profit = abs(float(tp_price) - float(last_close)) * max(0, qty_int_preview)
+                if qty_int_preview <= 0 or exp_profit < min_p:
+                    return
+            except Exception:
+                pass
 
         asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
         if asset_class == "crypto":
@@ -1715,15 +1849,25 @@ def _apply_ml_filter_rank_and_trade(
         df_1m = c.get("df_1m")
         if df_1m is None or getattr(df_1m, "empty", True):
             continue
-
         submit_entry(sym=sym, action=action, feat=feat, df_1m=df_1m)
 
 
 
-def cli() -> None:
-    p = argparse.ArgumentParser(prog="alpaca-day-bot")
-    p.add_argument("--observe-only", action="store_true", help="Compute signals/log only; do not place orders.")
-    p.add_argument("--backtest", action="store_true", help="Run historical backtest and exit.")
+def cli():
+    p = argparse.ArgumentParser(
+        description="Alpaca Paper Day Bot - Momentum Strategy Runner",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "--observe-only",
+        action="store_true",
+        help="Run in observation mode (no actual orders sent to Alpaca).",
+    )
+    p.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run a historical backtest for the current symbols and write a report.",
+    )
     p.add_argument(
         "--robustness",
         action="store_true",
@@ -1739,7 +1883,7 @@ def cli() -> None:
     p.add_argument(
         "--scheduled-tick",
         action="store_true",
-        help="Single trading pass then exit (for GitHub Actions / cron). Uses REST bar warmup; skips if bot.lock is held.",
+        help="Run a single trading iteration and exit (for external schedulers).",
     )
     p.add_argument(
         "--build-universe",
@@ -1762,6 +1906,14 @@ def cli() -> None:
         help="Close any open simulated call/put trades (virtual options) and exit.",
     )
     args = p.parse_args()
+
+    settings = load_settings()
+
+    state_dir = Path(settings.state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = state_dir / "logs"
+    setup_json_logging(str(logs_dir))
+
     run(
         observe_only_override=bool(args.observe_only),
         day_session=bool(args.day_session),
@@ -1910,6 +2062,8 @@ def run(
             ledger.close()
         return
 
+    realized_tracker = _RealizedPnlTracker()
+
     def on_trade_update(evt: TradeUpdateEvent) -> None:
         ledger.record_trade_update(evt)
         o = (evt.payload or {}).get("order") or {}
@@ -1937,8 +2091,101 @@ def run(
             },
         )
 
+        # Executed trade review (+ optional notifications):
+        # We approximate realized P&L from fill prices when a SELL closes out prior BUY fills.
+        try:
+            if str(evt.event or "").lower() == "fill":
+                sym = (evt.symbol or "").strip().upper()
+                fq = float(evt.filled_qty or 0.0)
+                fpx = float(evt.filled_avg_price or 0.0)
+                realized = realized_tracker.on_fill(symbol=sym, side=str(side), qty=fq, avg_px=fpx, ts=now_utc())
+                if realized is not None and isinstance(realized, dict):
+                    pnl = float(realized.get("realized_pnl_usd") or 0.0)
+                    # Persist a review row so we can analyze losses and learn from them.
+                    # This runs regardless of notification settings (notifications are optional).
+                    title = "Realized P&L"
+                    body = f"{sym}: {pnl:+.2f} USD"
+                    log.info("realized_pnl %s", body)
+
+                    # Persist a review row so we can analyze losses and learn from them.
+                    try:
+                        sig = ledger.latest_signal_before(symbol=sym, ts=now_utc())
+                    except Exception:
+                        sig = None
+                    tags = {}
+                    try:
+                        if pnl < 0:
+                            tags["is_loss"] = 1
+                        else:
+                            tags["is_gain"] = 1
+                    except Exception:
+                        pass
+                    try:
+                        feat = (sig or {}).get("features") if isinstance(sig, dict) else None
+                        slp = float((feat or {}).get("sl_price")) if feat and (feat.get("sl_price") is not None) else None
+                        tpp = float((feat or {}).get("tp_price")) if feat and (feat.get("tp_price") is not None) else None
+                        exit_px = float(realized.get("exit_price") or 0.0)
+                        if slp is not None and exit_px > 0 and exit_px <= slp * 1.001:
+                            tags["likely_stop_loss"] = 1
+                        if tpp is not None and exit_px > 0 and exit_px >= tpp * 0.999:
+                            tags["likely_take_profit"] = 1
+                    except Exception:
+                        pass
+                    try:
+                        ledger.record_executed_trade_review(
+                            ts_close=now_utc(),
+                            symbol=sym,
+                            realized_pnl_usd=pnl,
+                            qty_closed=float(realized.get("qty_closed") or 0.0),
+                            entry_ts=None,
+                            exit_ts=realized.get("exit_ts"),
+                            entry_avg_price=realized.get("entry_avg_price"),
+                            exit_price=realized.get("exit_price"),
+                            signal_id=(int(sig["id"]) if isinstance(sig, dict) and sig.get("id") is not None else None),
+                            signal_reason=(sig.get("reason") if isinstance(sig, dict) else None),
+                            tags=tags,
+                            features=(sig.get("features") if isinstance(sig, dict) else None),
+                            raw={"realized": realized, "signal": sig, "tags": tags},
+                        )
+                    except Exception:
+                        pass
+
+                    # Optional user-facing notification.
+                    try:
+                        if bool(getattr(settings, "notify_realized_pnl", False)):
+                            _macos_notify(title, body)
+                    except Exception:
+                        pass
+
+            # Notification on BUY (Opening position)
+            if str(evt.event or "").lower() == "fill" and str(side).lower() == "buy":
+                sym = (evt.symbol or "").strip().upper()
+                fq = float(evt.filled_qty or 0.0)
+                fpx = float(evt.filled_avg_price or 0.0)
+                title = "Trade Opened"
+                body = f"BUY {sym}: {int(fq)} @ {fpx:.2f}"
+                if bool(getattr(settings, "notify_realized_pnl", False)):
+                    _macos_notify(title, body)
+
+        except Exception:
+            pass
+
     tc = make_trading_client(settings)
     executor = OrderExecutor(tc)
+
+    # Seed realized-P&L tracking from current open positions so notifications work even after a restart.
+    try:
+        for p in tc.get_all_positions():
+            try:
+                sym = str(getattr(p, "symbol", "") or "").strip().upper()
+                qty = float(getattr(p, "qty", 0.0) or 0.0)
+                avg = float(getattr(p, "avg_entry_price", 0.0) or 0.0)
+                if sym and qty > 0 and avg > 0:
+                    realized_tracker.seed_position(symbol=sym, qty=qty, avg_entry_price=avg)
+            except Exception:
+                continue
+    except Exception:
+        pass
 
     buffer = BarBuffer(maxlen=int(settings.bar_buffer_maxlen))
     md = MarketDataStreamer(settings, buffer)
@@ -2093,6 +2340,21 @@ def run(
     else:
         _acquire_single_instance_lock(state_dir)
 
+    # Lightweight visibility into the *actual* scan universe size.
+    universe_latest_count = None
+    try:
+        p_u = Path(settings.state_dir) / "universe_latest.json"
+        if p_u.is_file():
+            uobj = json.loads(p_u.read_text(encoding="utf-8"))
+            if isinstance(uobj, dict):
+                ulist = uobj.get("symbols") or uobj.get("universe") or []
+            else:
+                ulist = uobj
+            if isinstance(ulist, list):
+                universe_latest_count = int(len(ulist))
+    except Exception:
+        universe_latest_count = None
+
     log.info(
         "startup",
         extra={
@@ -2100,6 +2362,10 @@ def run(
                 "observe_only": observe_only,
                 "scheduled_tick": scheduled_tick,
                 "symbols": settings.symbols,
+                "universe_enabled": bool(getattr(settings, "universe_enabled", False)),
+                "prefilter_enabled": bool(getattr(settings, "prefilter_enabled", False)),
+                "prefilter_max_symbols": int(getattr(settings, "prefilter_max_symbols", 0) or 0),
+                "universe_latest_count": universe_latest_count,
                 "bar_timeframe": settings.bar_timeframe,
                 "max_positions": settings.max_positions,
                 "max_gross_exposure_pct": settings.max_gross_exposure_pct,
@@ -2131,9 +2397,25 @@ def run(
         md_thread = threading.Thread(target=md.run_forever, name="market-data-ws", daemon=True)
         md_thread.start()
     else:
-        from alpaca_day_bot.data.rest_bars import RestBarPoller
-
-        rp = RestBarPoller(settings, buffer)
+        # Intraday polling mode (Continuous)
+        asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
+        log.info("initializing_market_data_poller", extra={"extra_json": {"asset_class": asset_class}})
+        
+        if asset_class == "crypto":
+            from alpaca_day_bot.data.crypto_rest_bars import CryptoRestBarPoller
+            rp = CryptoRestBarPoller(settings, buffer)
+            log.info("using_crypto_rest_poller")
+        else:
+            from alpaca_day_bot.data.rest_bars import RestBarPoller
+            rp = RestBarPoller(settings, buffer)
+            log.info("using_stock_rest_poller")
+        
+        # Day-session warmup: avoid several minutes of `no_1m_bars` / `warmup_indicators` right after boot.
+        try:
+            warmed = rp.warm_buffer(rounds=1, pause_s=0.5)
+            log.info("rest bars warmed events=%s", warmed)
+        except Exception:
+            pass
         threading.Thread(target=rp.run_forever, name="market-data-rest", daemon=True).start()
 
     tu_thread = threading.Thread(target=tu.run_forever, name="trade-updates-ws", daemon=True)
@@ -2179,7 +2461,10 @@ def run(
                             _dt.combine(market_day, settings.trade_end, tzinfo=settings.tzinfo()) - _td(minutes=fb)
                         ).time()
                         if mt >= close_cut:
+                            managed_symbols = set(_ordered_symbols(settings))
                             for sym in executor.open_position_symbols():
+                                if sym not in managed_symbols:
+                                    continue
                                 try:
                                     res = executor.close_position_market(sym)
                                     ledger.record_order_intent(
@@ -2279,15 +2564,77 @@ def run(
             mt = market_now.time()
             in_window = settings.trade_start <= mt <= settings.trade_end
 
+            # Flatten before close (avoid overnight holds) — equities only.
+            try:
+                asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
+            except Exception:
+                asset_class = "equity"
+            if asset_class != "crypto":
+                try:
+                    fb = int(getattr(settings, "flatten_before_close_minutes", 5) or 5)
+                except Exception:
+                    fb = 5
+                if fb > 0:
+                    try:
+                        close_cut = (
+                            datetime.combine(market_day, settings.trade_end, tzinfo=settings.tzinfo())
+                            - timedelta(minutes=fb)
+                        ).time()
+                        if mt >= close_cut:
+                            managed_symbols = set(_ordered_symbols(settings))
+                            for sym in executor.open_position_symbols():
+                                if sym not in managed_symbols:
+                                    continue
+                                try:
+                                    res = executor.close_position_market(sym)
+                                    ledger.record_order_intent(
+                                        ts=t0,
+                                        symbol=sym,
+                                        side="close",
+                                        notional_usd=0.0,
+                                        stop_price=0.0,
+                                        take_profit_price=0.0,
+                                        client_order_id=None,
+                                        alpaca_order_id=res.alpaca_order_id,
+                                        submitted=res.submitted,
+                                        reason=f"flatten_before_close:{res.reason}",
+                                        extra={"action": "EXIT_FLATTEN"},
+                                    )
+                                except Exception:
+                                    continue
+                            # Do not open new trades after flatten window.
+                            in_window = False
+                    except Exception:
+                        pass
+
             if day_session and not in_window:
                 # If we're running a single-day session, block until the window opens,
-                # and exit after the window closes (handled below).
+                # and exit after the window closes + a 5min reporting buffer.
                 if mt < settings.trade_start:
                     sleep_s = min(60.0, max(1.0, (datetime.combine(market_day, settings.trade_start, tzinfo=settings.tzinfo()) - market_now).total_seconds()))
                     time.sleep(sleep_s)
                     continue
                 if mt > settings.trade_end:
-                    break
+                    # Wait 5 minutes after close to ensure all fills are processed and summarized.
+                    report_ts = datetime.combine(market_day, settings.trade_end, tzinfo=settings.tzinfo()) + timedelta(minutes=5)
+                    if market_now >= report_ts:
+                        # Send summary notification
+                        try:
+                            from alpaca_day_bot.reporting.report import daily_summary
+                            summ = daily_summary(db_path, market_day)
+                            if summ.pnl is not None:
+                                title = f"Market Close Report: {market_day}"
+                                body = f"PnL: {summ.pnl:+.2f} USD ({summ.pnl_pct*100:+.2f}%)\nTrades: {summ.trades}\nGross: ${summ.max_gross:,.2f}"
+                                if bool(getattr(settings, "notify_realized_pnl", False)):
+                                    _macos_notify(title, body)
+                                log.info("daily_report_notification sent", extra={"extra_json": {"pnl": summ.pnl, "trades": summ.trades}})
+                        except Exception as e:
+                            log.warning("daily_report_notification_failed err=%s", e)
+                        break
+                    else:
+                        # Wait until 3:05 PM CT
+                        time.sleep(30)
+                        continue
 
             if in_window:
                 last_signal_scan_ts = _run_in_window_trading_cycle(

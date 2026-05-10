@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from alpaca.trading.stream import TradingStream
-
 from alpaca_day_bot.config import Settings
 from alpaca_day_bot.ws_retry import is_connection_or_rate_limit
 
@@ -43,7 +41,7 @@ class TradingUpdatesStreamer:
         self._settings = settings
         self._on_update = on_update
 
-    def _subscribe(self, stream: TradingStream) -> None:
+    def _subscribe(self, stream: Any) -> None:
         async def _handler(data) -> None:
             order = getattr(data, "order", None)
             payload = _build_trade_update_payload(data, order)
@@ -65,6 +63,8 @@ class TradingUpdatesStreamer:
 
     def run_forever(self) -> None:
         import time as _time
+
+        from alpaca.trading.stream import TradingStream
 
         backoff_s = 1.0
         while True:

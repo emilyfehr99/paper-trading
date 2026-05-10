@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 
 from datetime import time
 from zoneinfo import ZoneInfo
@@ -9,9 +10,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=os.getenv("ENV_FILE", ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
+        protected_namespaces=("settings_",),
     )
 
     apca_api_key_id: str = Field(alias="APCA_API_KEY_ID")
@@ -78,6 +80,10 @@ class Settings(BaseSettings):
 
     # Risk limits
     starting_equity_usd: float = Field(default=1000.0, alias="STARTING_EQUITY_USD")
+    # If >0, treat this as "session equity" for sizing/limits (paper accounts often have large balances).
+    equity_override_usd: float = Field(default=0.0, alias="EQUITY_OVERRIDE_USD")
+    # If true and EQUITY_OVERRIDE_USD>0, reset today's risk baseline to the override on process start.
+    reset_start_equity_on_boot: bool = Field(default=False, alias="RESET_START_EQUITY_ON_BOOT")
     max_gross_exposure_pct: float = Field(default=0.5, alias="MAX_GROSS_EXPOSURE_PCT")
     max_positions: int = Field(default=5, alias="MAX_POSITIONS")
     max_trades_per_day: int = Field(default=20, alias="MAX_TRADES_PER_DAY")
@@ -142,10 +148,18 @@ class Settings(BaseSettings):
     ml_min_edge_bps: float = Field(default=10.0, alias="ML_MIN_EDGE_BPS")
     # Floor for regression-gated entries (max with artifact recommended_regression_min).
     model_regression_min_pred: float = Field(default=0.0, alias="MODEL_REGRESSION_MIN_PRED")
+    # If true, refuse ML bundles whose meta.dataset_kind starts with executed_trades (signal/sim-trained only).
+    ml_inference_disallow_executed_dataset: bool = Field(
+        default=False,
+        alias="ML_INFERENCE_DISALLOW_EXECUTED_DATASET",
+    )
 
     # Exits (bracket-like)
     stop_loss_atr_mult: float = Field(default=1.5, alias="STOP_LOSS_ATR_MULT")
     take_profit_r_mult: float = Field(default=1.5, alias="TAKE_PROFIT_R_MULT")
+
+    # Entry quality: skip trades whose expected TP is too small in USD.
+    min_expected_profit_usd: float = Field(default=0.0, alias="MIN_EXPECTED_PROFIT_USD")
 
     # Smarter exits (in addition to TP/SL brackets)
     max_hold_minutes: float = Field(default=0.0, alias="MAX_HOLD_MINUTES")  # 0 disables time-exit
@@ -166,6 +180,9 @@ class Settings(BaseSettings):
     # Live diagnostics: periodic log of closest-to-BUY symbols (see signal_scan in logs).
     signal_scan_interval_s: float = Field(default=60.0, alias="SIGNAL_SCAN_INTERVAL_S")
 
+    # Notifications (local runs): when a position round-trip closes, emit a macOS notification.
+    notify_realized_pnl: bool = Field(default=False, alias="NOTIFY_REALIZED_PNL")
+
     # News: alpaca (default) | alphavantage | google_rss | tickertick | both | combo
     news_provider: str = Field(default="alpaca", alias="NEWS_PROVIDER")
     alphavantage_api_key: str | None = Field(default=None, alias="ALPHAVANTAGE_API_KEY")
@@ -182,6 +199,8 @@ class Settings(BaseSettings):
     # Signal "accuracy": label BUY rows with forward return vs signal-time close after min wall-clock age.
     signal_accuracy_enabled: bool = Field(default=True, alias="SIGNAL_ACCURACY_ENABLED")
     signal_accuracy_min_age_minutes: float = Field(default=15.0, alias="SIGNAL_ACCURACY_MIN_AGE_MINUTES")
+    # How many missing-label signals to process per tick (any date; drains ML training backlog).
+    signal_label_backlog_per_tick: int = Field(default=250, alias="SIGNAL_LABEL_BACKLOG_PER_TICK")
     # Prefer triple-barrier labels (aligned to TP/SL); forward-return labels are optional and can be disabled.
     label_forward_returns_enabled: bool = Field(default=True, alias="LABEL_FORWARD_RETURNS_ENABLED")
 
@@ -223,7 +242,8 @@ class Settings(BaseSettings):
     min_executed_round_trips_for_model: int = Field(default=200, alias="MIN_EXECUTED_ROUND_TRIPS_FOR_MODEL")
 
     # Execution-quality filters
-    min_volume_ratio_trade: float = Field(default=1.0, alias="MIN_VOLUME_RATIO_TRADE")
+    # Relative volume vs recent SMA(volume). 1.0 is quite strict and can produce "no trades" days.
+    min_volume_ratio_trade: float = Field(default=0.85, alias="MIN_VOLUME_RATIO_TRADE")
 
     # Short guardrails
     max_short_positions: int = Field(default=5, alias="MAX_SHORT_POSITIONS")

@@ -4,8 +4,8 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
-from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.trading.requests import (
     GetOrdersRequest,
@@ -16,6 +16,9 @@ from alpaca.trading.requests import (
 )
 
 from alpaca_day_bot.trading.updates import TradeUpdateEvent
+
+if TYPE_CHECKING:
+    from alpaca.trading.client import TradingClient
 
 
 @dataclass(frozen=True)
@@ -66,11 +69,23 @@ class OrderExecutor:
         return True
 
     def get_account_equity(self) -> float:
-        acct = self._tc.get_account()
-        try:
-            return float(acct.equity)
-        except Exception:
-            return float(acct.last_equity)
+        import time as _time
+
+        last_err: Exception | None = None
+        for i in range(3):
+            try:
+                acct = self._tc.get_account()
+                try:
+                    return float(acct.equity)
+                except Exception:
+                    return float(acct.last_equity)
+            except Exception as e:
+                last_err = e
+                _time.sleep(0.35 * float(i + 1))
+                continue
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("get_account_failed")
 
     def gross_exposure_usd(self) -> float:
         positions = self._tc.get_all_positions()

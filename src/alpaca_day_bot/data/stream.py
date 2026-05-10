@@ -4,14 +4,9 @@ import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Any, Iterable
 
 import logging
-
-import websockets
-from alpaca.data.enums import DataFeed
-from alpaca.data.live.websocket import DataStream
-from alpaca.data.live.stock import StockDataStream
 
 from alpaca_day_bot.config import Settings
 from alpaca_day_bot.ws_retry import is_connection_or_rate_limit
@@ -19,65 +14,82 @@ from alpaca_day_bot.ws_retry import is_connection_or_rate_limit
 log = logging.getLogger("alpaca_day_bot.market_data")
 _alpaca_ws_log = logging.getLogger("alpaca.data.live.websocket")
 
+_ALPACA_DATASTREAM_PATCHED = False
 
-async def _datastream_run_forever_with_limit_backoff(self: DataStream) -> None:
+
+def _ensure_alpaca_datastream_backoff_patch() -> None:
     """
-    Replaces alpaca DataStream._run_forever: stock auth ValueError (connection limit)
-    tight-looped with log.exception + no sleep. We close, sleep 120s, retry.
-    Patched onto DataStream so every StockDataStream instance benefits.
+    Patch alpaca DataStream only when live streaming starts.
+    Importing alpaca's websocket stack at module load pulls `websockets.legacy` and emits a
+    DeprecationWarning during unrelated imports (e.g. pytest collecting tests that import main).
     """
-    self._loop = asyncio.get_running_loop()
-    while not any(
-        v
-        for k, v in self._handlers.items()
-        if k not in ("cancelErrors", "corrections")
-    ):
-        if not self._stop_stream_queue.empty():
-            self._stop_stream_queue.get(timeout=1)
-            return
-        await asyncio.sleep(0)
-    _alpaca_ws_log.info(f"started {self._name} stream")
-    self._should_run = True
-    self._running = False
-    while True:
-        try:
-            if not self._should_run:
-                _alpaca_ws_log.info("{} stream stopped".format(self._name))
+    global _ALPACA_DATASTREAM_PATCHED
+    if _ALPACA_DATASTREAM_PATCHED:
+        return
+    from alpaca.data.live.websocket import DataStream
+
+    async def _datastream_run_forever_with_limit_backoff(self: Any) -> None:
+        """
+        Replaces alpaca DataStream._run_forever: stock auth ValueError (connection limit)
+        tight-looped with log.exception + no sleep. We close, sleep 120s, retry.
+        Patched onto DataStream so every StockDataStream instance benefits.
+        """
+        self._loop = asyncio.get_running_loop()
+        while not any(
+            v
+            for k, v in self._handlers.items()
+            if k not in ("cancelErrors", "corrections")
+        ):
+            if not self._stop_stream_queue.empty():
+                self._stop_stream_queue.get(timeout=1)
                 return
-            if not self._running:
-                _alpaca_ws_log.info("starting {} websocket connection".format(self._name))
-                await self._start_ws()
-                await self._send_subscribe_msg()
-                self._running = True
-            await self._consume()
-        except websockets.WebSocketException as wse:
-            await self.close()
-            self._running = False
-            _alpaca_ws_log.warning("data websocket error, restarting connection: " + str(wse))
-        except ValueError as ve:
-            if "insufficient subscription" in str(ve):
-                await self.close()
-                self._running = False
-                _alpaca_ws_log.exception("error during websocket communication: %s", ve)
-                return
-            if is_connection_or_rate_limit(ve):
-                await self.close()
-                self._running = False
-                log.warning(
-                    "data websocket: connection/rate limit — backing off 120s. "
-                    "Kill duplicate bots; only one process per API key.",
-                    extra={"extra_json": {"error": str(ve)}},
-                )
-                await asyncio.sleep(120.0)
-                continue
-            _alpaca_ws_log.exception("error during websocket communication: %s", ve)
-        except Exception as e:
-            _alpaca_ws_log.exception("error during websocket communication: %s", e)
-        finally:
             await asyncio.sleep(0)
+        _alpaca_ws_log.info(f"started {self._name} stream")
+        self._should_run = True
+        self._running = False
+        while True:
+            try:
+                if not self._should_run:
+                    _alpaca_ws_log.info("{} stream stopped".format(self._name))
+                    return
+                if not self._running:
+                    _alpaca_ws_log.info("starting {} websocket connection".format(self._name))
+                    await self._start_ws()
+                    await self._send_subscribe_msg()
+                    self._running = True
+                await self._consume()
+            except Exception as e:
+                import websockets as ws
 
+                if isinstance(e, ws.WebSocketException):
+                    await self.close()
+                    self._running = False
+                    _alpaca_ws_log.warning("data websocket error, restarting connection: " + str(e))
+                elif isinstance(e, ValueError):
+                    ve = e
+                    if "insufficient subscription" in str(ve):
+                        await self.close()
+                        self._running = False
+                        _alpaca_ws_log.exception("error during websocket communication: %s", ve)
+                        return
+                    if is_connection_or_rate_limit(ve):
+                        await self.close()
+                        self._running = False
+                        log.warning(
+                            "data websocket: connection/rate limit — backing off 120s. "
+                            "Kill duplicate bots; only one process per API key.",
+                            extra={"extra_json": {"error": str(ve)}},
+                        )
+                        await asyncio.sleep(120.0)
+                        continue
+                    _alpaca_ws_log.exception("error during websocket communication: %s", ve)
+                else:
+                    _alpaca_ws_log.exception("error during websocket communication: %s", e)
+            finally:
+                await asyncio.sleep(0)
 
-DataStream._run_forever = _datastream_run_forever_with_limit_backoff  # type: ignore[assignment]
+    DataStream._run_forever = _datastream_run_forever_with_limit_backoff  # type: ignore[assignment]
+    _ALPACA_DATASTREAM_PATCHED = True
 
 
 @dataclass(frozen=True)
@@ -174,6 +186,10 @@ class MarketDataStreamer:
         # New StockDataStream + single subscribe per attempt so we never stack subscriptions
         # on a half-dead client (a common cause of Alpaca "connection limit exceeded").
         import time as _time
+
+        _ensure_alpaca_datastream_backoff_patch()
+        from alpaca.data.enums import DataFeed
+        from alpaca.data.live.stock import StockDataStream
 
         backoff_s = 1.0
         while True:

@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from alpaca_day_bot.reporting.trades import _rows_to_fills, reconstruct_round_trips
-from alpaca_day_bot.ml.infer import _flatten_feature_dict
+from alpaca_day_bot.ml.dataset import _parse_iso_dt, flatten_signal_features
 from alpaca_day_bot.ml.targets import (
     beat_fee_binary,
     binary_win,
@@ -23,18 +23,6 @@ class ExecutedDatasetResult:
     X: pd.DataFrame
     y: pd.Series
     meta: pd.DataFrame  # symbol, entry_ts, exit_ts, direction, pnl
-
-
-def _parse_iso_dt(s: str | None) -> datetime | None:
-    if not s or not isinstance(s, str):
-        return None
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
 
 
 def _load_signals(conn: sqlite3.Connection) -> list[tuple[datetime, str, str, str]]:
@@ -139,12 +127,16 @@ def build_executed_trade_dataset(
         )
         if feat is None:
             continue
-        x = _flatten_feature_dict(feat)
-        # Add executed-trade context
-        x["exec_direction_long"] = 1.0 if rt.direction == "long" else 0.0
-        x["exec_qty"] = float(rt.qty)
-        x["exec_entry_px"] = float(rt.entry_px)
-        x["exec_exit_px"] = float(rt.exit_px)
+        anchor = _parse_iso_dt(feat.get("signal_ts")) if isinstance(feat.get("signal_ts"), str) else None
+        if anchor is None:
+            anchor = rt.entry_ts
+        act = "BUY" if str(rt.direction).strip().lower() == "long" else "SHORT"
+        x = flatten_signal_features(
+            feat,
+            reason=str(feat.get("reason") or ""),
+            action=act,
+            anchor_ts=anchor,
+        )
 
         pnl_v = float(rt.pnl)
         notional = abs(float(rt.entry_px) * float(rt.qty))

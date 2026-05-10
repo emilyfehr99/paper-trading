@@ -32,7 +32,12 @@ def train_meta_labeling(
     random_state: int = 42,
 ) -> tuple[MetaModel, pd.Series]:
     """
-    Meta-labeling:
+    Meta-labeling.
+
+    For parity with production ML, build ``X`` with the same columns as
+    ``alpaca_day_bot.ml.dataset.flatten_signal_features`` (or reuse rows from the ledger
+    training pipeline) so primary/safety models see the same geometry as ``ml.infer``.
+
     - Primary model (RandomForest) predicts trend direction.
     - Secondary model (XGBoost) predicts whether the primary prediction is correct.
     - Returns (trained bundle, safety_proba_series aligned to X).

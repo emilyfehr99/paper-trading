@@ -47,10 +47,22 @@ class RestBarPoller:
 
         lag_m = float(self._settings.rest_bar_end_lag_minutes)
         end = datetime.now(tz=timezone.utc) - timedelta(minutes=lag_m)
-        # First fetch: include multiple market sessions so 15m RSI(14) can be ready
-        # even early in the day (a same-day minute window may be too short).
-        # Later fetches keep a small window to reduce payload.
-        start = (end - timedelta(days=7)) if self._wide_first_fetch else (end - timedelta(minutes=20))
+        symbols = list(self._settings.symbols)
+        # First fetch: pull enough 1m bars so 15m RSI(14) is ready after resampling.
+        #
+        # IMPORTANT: Alpaca's `limit` is per-request (not per-symbol). If we request too wide of a
+        # window for many symbols, the response truncates and some symbols get *zero* bars, which
+        # then looks like the bot is "only scanning a few symbols".
+        #
+        # So we size the first fetch window inversely with the number of symbols.
+        if self._wide_first_fetch:
+            n_sym = max(1, int(len(symbols)))
+            # Target bars per symbol (cap to keep total <= 10k).
+            bars_per_sym = int(max(480, min(2000, 9000 // n_sym)))
+            start = end - timedelta(minutes=bars_per_sym)
+        else:
+            # Later fetches keep a small window to reduce payload.
+            start = end - timedelta(minutes=20)
 
         client = StockHistoricalDataClient(
             self._settings.apca_api_key_id,
@@ -60,9 +72,18 @@ class RestBarPoller:
             for i in range(0, len(xs), n):
                 yield xs[i : i + n]
 
-        symbols = list(self._settings.symbols)
         # Alpaca endpoints can reject very large symbol lists; batch conservatively.
+        # Also: limit is per-request. Keep batches small enough that (symbols * bars_per_sym) stays < 10k.
+        try:
+            mins = max(1, int((end - start).total_seconds() // 60))
+        except Exception:
+            mins = 20
         batch_n = 200
+        try:
+            if mins >= 200:
+                batch_n = max(1, min(200, int(9000 // max(1, mins))))
+        except Exception:
+            batch_n = 200
 
         out: list[BarEvent] = []
         for batch in chunks(symbols, batch_n):

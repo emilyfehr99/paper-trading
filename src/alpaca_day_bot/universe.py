@@ -48,7 +48,12 @@ def build_master_universe_assets(
     tc = TradingClient(apca_api_key_id, apca_api_secret_key, paper=True)
 
     try:
-        assets = tc.get_all_assets()
+        from alpaca.trading.enums import AssetClass, AssetStatus
+        from alpaca.trading.requests import GetAssetsRequest
+
+        assets = tc.get_all_assets(
+            GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+        )
     except Exception as e:
         payload = {
             "generated_at_utc": t0.isoformat(),
@@ -77,12 +82,17 @@ def build_master_universe_assets(
             rejected["no_symbol"] += 1
             continue
 
-        status = str(getattr(a, "status", "") or "").strip().lower()
-        if status and status != "active":
+        # `GetAssetsRequest(status=ACTIVE)` should already filter, but keep this as a safe guard.
+        st_obj = getattr(a, "status", "") or ""
+        status = (
+            str(getattr(st_obj, "value", "") or getattr(st_obj, "name", "") or st_obj).strip().lower()
+        )
+        if status and status not in ("active", "assetstatus.active"):
             rejected["inactive"] += 1
             continue
 
-        ex = str(getattr(a, "exchange", "") or "").strip().upper()
+        ex_obj = getattr(a, "exchange", "") or ""
+        ex = str(getattr(ex_obj, "value", "") or getattr(ex_obj, "name", "") or ex_obj).strip().upper()
         if allowed_exchanges and ex and ex not in set(allowed_exchanges):
             rejected["bad_exchange"] += 1
             continue
