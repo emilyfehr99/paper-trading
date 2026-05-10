@@ -113,6 +113,24 @@ class V1RulesSignalEngine(BaseStrategy):
         df["volume_sma"] = df["volume"].rolling(int(self._volume_sma_len)).mean()
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(self._atr_len))
         df["atr_avg"] = df["atr"].rolling(int(self._atr_regime_lookback)).mean()
+
+        # SuperTrend (Trend Follower + Trailing Stop)
+        try:
+            st = ta.supertrend(df["high"], df["low"], df["close"], length=10, multiplier=3.0)
+            if st is not None:
+                df = pd.concat([df, st], axis=1)
+        except Exception:
+            pass
+
+        # Ichimoku Cloud (Trend & Support/Resistance)
+        try:
+            ichi_res = ta.ichimoku(df["high"], df["low"], df["close"])
+            if ichi_res is not None and len(ichi_res) >= 1:
+                ichi = ichi_res[0]
+                if ichi is not None:
+                    df = pd.concat([df, ichi], axis=1)
+        except Exception:
+            pass
         # "Monthly" ATR proxy for volatility gating (prefer ~20 trading days if available).
         monthly_lb = int(390 * 20)
         if len(df) >= monthly_lb:
@@ -208,6 +226,17 @@ class V1RulesSignalEngine(BaseStrategy):
         chk["macd_aligned"] = bool(macd_bull)
         chk["above_vwap"] = bool(above_vwap)
         chk["volume_confirm"] = bool(volume_confirm)
+        
+        # NEW: Strategy indicators
+        st_dir = last.get("SUPERTd_10_3.0")
+        chk["supertrend_ok"] = bool(st_dir == 1)
+        
+        span_a = last.get("ISA_9")
+        span_b = last.get("ISB_26")
+        if not pd.isna(span_a) and not pd.isna(span_b):
+            chk["ichimoku_ok"] = float(last["close"]) > max(float(span_a), float(span_b))
+        else:
+            chk["ichimoku_ok"] = True # Fail-open during warmup
 
         score = sum(1 for v in chk.values() if v)
         base["buy_score"] = int(score)
@@ -246,6 +275,10 @@ class V1RulesSignalEngine(BaseStrategy):
             base["blocked"] = "below_vwap"
         elif not volume_confirm:
             base["blocked"] = "no_volume_confirm"
+        elif not chk["supertrend_ok"]:
+            base["blocked"] = "supertrend_bearish"
+        elif not chk["ichimoku_ok"]:
+            base["blocked"] = "below_ichimoku_cloud"
         else:
             base["blocked"] = None
             base["would_action"] = "BUY"
@@ -353,9 +386,11 @@ class V1RulesSignalEngine(BaseStrategy):
 
         # NEW: Ichimoku Cloud (Trend & Support/Resistance)
         try:
-            ichi, _ = ta.ichimoku(df["high"], df["low"], df["close"])
-            if ichi is not None:
-                df = pd.concat([df, ichi], axis=1)
+            ichi_res = ta.ichimoku(df["high"], df["low"], df["close"])
+            if ichi_res is not None and len(ichi_res) >= 1:
+                ichi = ichi_res[0]
+                if ichi is not None:
+                    df = pd.concat([df, ichi], axis=1)
         except Exception:
             pass
 
