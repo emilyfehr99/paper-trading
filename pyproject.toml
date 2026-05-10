@@ -25,6 +25,19 @@ dependencies = [
 alpaca-day-bot = "alpaca_day_bot.main:cli"
 alpaca-watch-trades = "alpaca_day_bot.watch_trades:main"
 alpaca-ml-research = "alpaca_day_bot.research_ml.cli:main"
+alpaca-backfill-forward-labels = "alpaca_day_bot.tools.backfill_forward_labels_yf:main"
+alpaca-backfill-triple-barrier = "alpaca_day_bot.tools.backfill_triple_barrier_yf:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+  # Pytest forces DeprecationWarning visible during collection; alpaca-py imports websockets.legacy.
+  "ignore::DeprecationWarning:websockets.legacy",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
