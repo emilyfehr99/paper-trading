@@ -1084,16 +1084,8 @@ class AetherisBotPro:
                         continue
 
                 
-                # Fetch actual open stop order for this symbol to get real stop price
-                req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym], nested=True)
-                orders = self.executor._tc.get_orders(req) or []
-                
-                stop_order = None
-                for o in orders:
-                    if str(o.type).split(".")[-1].lower() in ("stop", "stop_limit"):
-                        stop_order = o
-                        break
-                
+                # Fetch actual open stop order for this symbol using robust finder
+                stop_order = self.executor.find_open_stop_order_for_symbol(sym)
                 if stop_order is None or stop_order.stop_price is None:
                     continue
                 

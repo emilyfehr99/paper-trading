@@ -905,6 +905,57 @@ class OrderExecutor:
         return None
 
 
+    def find_open_stop_order_for_symbol(self, symbol: str) -> Any | None:
+        """
+        Robustly finds the active stop-loss order for a symbol.
+        Handles Alpaca's complex bracket and OCO nesting:
+        1. Checks top-level open orders.
+        2. Checks legs of open parent orders (e.g. OCO).
+        3. Checks legs of the most recent filled parent order (bracket).
+        """
+        try:
+            # 1. Query open orders (includes open parent orders and orphan open legs)
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], nested=True)
+            open_orders = self._tc.get_orders(req) or []
+            
+            # Look for top-level stop order
+            for o in open_orders:
+                if str(o.type).split(".")[-1].lower() in ("stop", "stop_limit"):
+                    return o
+                    
+            # Look inside legs of open parent orders (like OCO)
+            for o in open_orders:
+                if hasattr(o, "legs") and o.legs:
+                    for leg in o.legs:
+                        if str(leg.type).split(".")[-1].lower() in ("stop", "stop_limit"):
+                            # If it is HELD or NEW, it is our active stop
+                            if str(leg.status).split(".")[-1].lower() in ("held", "new", "accepted"):
+                                return leg
+                                
+            # 2. Look inside legs of recent filled parent orders (standard filled brackets)
+            req_closed = GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[symbol], nested=True, limit=20)
+            closed_orders = self._tc.get_orders(req_closed) or []
+            
+            # Sort by updated_at descending to get the most recent filled entry
+            closed_orders = sorted(closed_orders, key=lambda x: getattr(x, "updated_at", getattr(x, "created_at", datetime.min)), reverse=True)
+            for o in closed_orders:
+                # We only care about filled entry orders (buy/sell) that have legs
+                if str(o.status).split(".")[-1].lower() == "filled" and hasattr(o, "legs") and o.legs:
+                    for leg in o.legs:
+                        if str(leg.type).split(".")[-1].lower() in ("stop", "stop_limit"):
+                            # Query the leg's current live status to ensure it hasn't filled/canceled
+                            try:
+                                live_leg = self._tc.get_order_by_id(str(leg.id))
+                                if str(live_leg.status).split(".")[-1].lower() in ("held", "new", "accepted"):
+                                    return live_leg
+                            except Exception:
+                                pass
+        except Exception as e:
+            from alpaca_day_bot.aetheris_bot import log
+            log.error(f"Error finding open stop order for {symbol}: {e}")
+            
+        return None
+
     def replace_stop_loss(self, order_id: str, new_stop_price: float) -> bool:
         """Replace an existing stop loss order with a new stop price."""
         try:
@@ -920,14 +971,9 @@ class OrderExecutor:
     def update_stop_loss_for_symbol(self, symbol: str, new_stop_price: float) -> bool:
         """Find the open stop loss order for a symbol and update its price."""
         try:
-            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], nested=True)
-            orders = self._tc.get_orders(req) or []
-            # Find the stop loss leg (usually has side and type stop)
-            for o in orders:
-                # Alpaca bracket legs are often nested or have a parent_id
-                # We look for 'stop' or 'stop_limit' orders on the opposite side of the position
-                if str(o.type).split(".")[-1].lower() in ("stop", "stop_limit"):
-                    return self.replace_stop_loss(str(o.id), new_stop_price)
+            stop_order = self.find_open_stop_order_for_symbol(symbol)
+            if stop_order:
+                return self.replace_stop_loss(str(stop_order.id), new_stop_price)
             return False
         except Exception as e:
             from alpaca_day_bot.aetheris_bot import log
@@ -1069,13 +1115,40 @@ class OrderExecutor:
         except Exception:
             pass
 
-        # TIMEOUT: Cancel and return
+        # TIMEOUT: Cancel and check for partial fill
         try:
             self._tc.cancel_order_by_id(oid)
             from alpaca_day_bot.services.telemetry import CANCELLED_ORDERS
             CANCELLED_ORDERS.inc()
         except Exception:
             pass
+
+        time.sleep(1.5) # Wait for cancel to settle
+        try:
+            final_order = self._tc.get_order_by_id(oid)
+            fq = float(final_order.filled_qty or 0)
+            if fq > 0.0001:
+                # We had a partial fill!
+                # Since Alpaca canceled the original TP/SL bracket legs when we canceled the parent order,
+                # we must manually submit a new OCO exit order for the filled quantity to protect it.
+                exit_side = "sell" if side == OrderSide.BUY else "buy"
+                self.submit_exit_oco(
+                    symbol=symbol,
+                    qty=fq,
+                    side=exit_side,
+                    take_profit_price=take_profit_price,
+                    stop_price=stop_price
+                )
+                
+                # Record fill in ledger and return success
+                self._record_fill_intent(
+                    symbol, side, fq, limit_price, stop_price, take_profit_price, client_order_id, oid, final_order
+                )
+                return ExecutionResult(True, "chase_partial_filled", alpaca_order_id=oid)
+        except Exception as e:
+            from alpaca_day_bot.aetheris_bot import log
+            log.error(f"Error handling partial fill recovery for {symbol}: {e}")
+            
         return ExecutionResult(False, "chase_timeout_canceled", alpaca_order_id=oid)
 
     def submit_simple_limit_chase(
