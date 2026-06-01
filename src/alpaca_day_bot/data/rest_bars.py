@@ -40,56 +40,105 @@ class RestBarPoller:
 
     def _fetch_events(self) -> list[BarEvent]:
         import pandas as pd
-        from alpaca.data.enums import DataFeed
-        from alpaca.data.historical import StockHistoricalDataClient
-        from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        lag_m = float(self._settings.rest_bar_end_lag_minutes)
+        asset_class = (getattr(self._settings, "asset_class", "equity") or "equity").strip().lower()
+        is_crypto = asset_class == "crypto"
+
+        lag_m = float(self._settings.crypto_rest_bar_end_lag_minutes if is_crypto else self._settings.rest_bar_end_lag_minutes)
         end = datetime.now(tz=timezone.utc) - timedelta(minutes=lag_m)
         # First fetch: include multiple market sessions so 15m RSI(14) can be ready
         # even early in the day (a same-day minute window may be too short).
         # Later fetches keep a small window to reduce payload.
         start = (end - timedelta(days=7)) if self._wide_first_fetch else (end - timedelta(minutes=20))
 
-        client = StockHistoricalDataClient(
-            self._settings.apca_api_key_id,
-            self._settings.apca_api_secret_key,
-        )
+        if is_crypto:
+            from alpaca.data.historical import CryptoHistoricalDataClient
+            from alpaca.data.requests import CryptoBarsRequest
+            client = CryptoHistoricalDataClient(
+                self._settings.apca_api_key_id,
+                self._settings.apca_api_secret_key,
+            )
+        else:
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockBarsRequest
+            from alpaca.data.enums import DataFeed
+            client = StockHistoricalDataClient(
+                self._settings.apca_api_key_id,
+                self._settings.apca_api_secret_key,
+            )
+
         def chunks(xs: list[str], n: int):
             for i in range(0, len(xs), n):
                 yield xs[i : i + n]
 
-        symbols = list(self._settings.symbols)
+        symbols = []
+        for s in self._settings.symbols:
+            if is_crypto:
+                if "/" in s:
+                    symbols.append(s)
+            else:
+                if "/" not in s:
+                    symbols.append(s)
         # Alpaca endpoints can reject very large symbol lists; batch conservatively.
         batch_n = 200
-
+        batches = list(chunks(symbols, batch_n))
         out: list[BarEvent] = []
-        for batch in chunks(symbols, batch_n):
-            req = StockBarsRequest(
-                symbol_or_symbols=batch,
-                timeframe=TimeFrame.Minute,
-                start=start,
-                end=end,
-                feed=DataFeed.IEX,
-                limit=10000,
-            )
-            bars = client.get_stock_bars(req)
-            df = bars.df
-            if df is None or getattr(df, "empty", True):
-                continue
-            if isinstance(df.index, pd.MultiIndex):
-                for sym in batch:
-                    try:
-                        sdf = df.xs(sym, level=0)
-                    except Exception:
-                        continue
-                    for ts, row in sdf.iterrows():
-                        out.append(self._row_to_event(str(sym), ts, row))
-            else:
-                sym = str(batch[0])
-                for ts, row in df.iterrows():
-                    out.append(self._row_to_event(sym, ts, row))
+
+        def _fetch_batch(batch):
+            try:
+                if is_crypto:
+                    req = CryptoBarsRequest(
+                        symbol_or_symbols=batch,
+                        timeframe=TimeFrame.Minute,
+                        start=start,
+                        end=end,
+                        limit=10000,
+                    )
+                    bars = client.get_crypto_bars(req)
+                else:
+                    req = StockBarsRequest(
+                        symbol_or_symbols=batch,
+                        timeframe=TimeFrame.Minute,
+                        start=start,
+                        end=end,
+                        feed=DataFeed.IEX,
+                        extended_hours=True,
+                        limit=10000,
+                    )
+                    bars = client.get_stock_bars(req)
+
+                df = bars.df
+                if df is None or getattr(df, "empty", True):
+                    return []
+
+                batch_events = []
+                if isinstance(df.index, pd.MultiIndex):
+                    for sym in batch:
+                        try:
+                            sdf = df.xs(sym, level=0)
+                        except Exception:
+                            continue
+                        for ts, row in sdf.iterrows():
+                            batch_events.append(self._row_to_event(str(sym), ts, row))
+                else:
+                    sym = str(batch[0])
+                    for ts, row in df.iterrows():
+                        batch_events.append(self._row_to_event(sym, ts, row))
+                return batch_events
+            except Exception as e:
+                log.warning("batch fetch failed for symbols %s: %s", batch[:5], e)
+                return []
+
+        # Run all batches concurrently (I/O bound Alpaca calls)
+        # Using 8 workers so we fetch 1500 symbols in parallel instantly.
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="rest_poller") as executor:
+            futures = {executor.submit(_fetch_batch, b): b for b in batches}
+            for fut in as_completed(futures):
+                batch_res = fut.result()
+                if batch_res:
+                    out.extend(batch_res)
 
         if out:
             self._wide_first_fetch = False
@@ -105,12 +154,8 @@ class RestBarPoller:
                 log.warning("warm_buffer fetch failed: %s", e, exc_info=True)
                 events = []
             if events:
-
-                async def _push() -> None:
-                    for e in events:
-                        await self._buffer.append(e)
-
-                asyncio.run(_push())
+                for e in events:
+                    self._buffer.append(e)
                 total += len(events)
             time.sleep(pause_s)
         return total
@@ -130,12 +175,8 @@ class RestBarPoller:
             try:
                 events = self._fetch_events()
                 if events:
-
-                    async def _push() -> None:
-                        for e in events:
-                            await self._buffer.append(e)
-
-                    asyncio.run(_push())
+                    for e in events:
+                        self._buffer.append(e)
             except Exception as e:
                 log.warning("rest bar fetch failed: %s", e, exc_info=True)
             elapsed = time.monotonic() - t0

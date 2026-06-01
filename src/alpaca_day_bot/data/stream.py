@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -53,6 +54,8 @@ async def _datastream_run_forever_with_limit_backoff(self: DataStream) -> None:
         except websockets.WebSocketException as wse:
             await self.close()
             self._running = False
+            from alpaca_day_bot.services.telemetry import WEBSOCKET_DROPS
+            WEBSOCKET_DROPS.inc()
             _alpaca_ws_log.warning("data websocket error, restarting connection: " + str(wse))
         except ValueError as ve:
             if "insufficient subscription" in str(ve):
@@ -63,15 +66,19 @@ async def _datastream_run_forever_with_limit_backoff(self: DataStream) -> None:
             if is_connection_or_rate_limit(ve):
                 await self.close()
                 self._running = False
+                from alpaca_day_bot.services.telemetry import WEBSOCKET_DROPS
+                WEBSOCKET_DROPS.inc()
                 log.warning(
-                    "data websocket: connection/rate limit — backing off 120s. "
-                    "Kill duplicate bots; only one process per API key.",
-                    extra={"extra_json": {"error": str(ve)}},
+                     "data websocket: connection/rate limit — backing off 120s. "
+                     "Kill duplicate bots; only one process per API key.",
+                     extra={"extra_json": {"error": str(ve)}},
                 )
                 await asyncio.sleep(120.0)
                 continue
             _alpaca_ws_log.exception("error during websocket communication: %s", ve)
         except Exception as e:
+            from alpaca_day_bot.services.telemetry import WEBSOCKET_DROPS
+            WEBSOCKET_DROPS.inc()
             _alpaca_ws_log.exception("error during websocket communication: %s", e)
         finally:
             await asyncio.sleep(0)
@@ -96,10 +103,10 @@ class BarBuffer:
     def __init__(self, maxlen: int = 512) -> None:
         self._buf: dict[str, deque[BarEvent]] = defaultdict(lambda: deque(maxlen=maxlen))
         self._last_seen_ts: dict[str, datetime] = {}
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()
 
-    async def append(self, bar: BarEvent) -> bool:
-        async with self._lock:
+    def append(self, bar: BarEvent) -> bool:
+        with self._lock:
             last = self._last_seen_ts.get(bar.symbol)
             if last is not None and bar.ts <= last:
                 return False
@@ -107,30 +114,30 @@ class BarBuffer:
             self._buf[bar.symbol].append(bar)
             return True
 
-    async def snapshot(self, symbol: str) -> list[BarEvent]:
-        async with self._lock:
+    def snapshot(self, symbol: str) -> list[BarEvent]:
+        with self._lock:
             return list(self._buf.get(symbol, []))
 
-    async def latest(self, symbol: str) -> BarEvent | None:
-        async with self._lock:
+    def latest(self, symbol: str) -> BarEvent | None:
+        with self._lock:
             dq = self._buf.get(symbol)
             if not dq:
                 return None
             return dq[-1]
 
-    async def snapshot_df(self, symbol: str):
+    def snapshot_df(self, symbol: str):
         """
         Return a pandas DataFrame indexed by UTC timestamp with OHLCV columns.
         NaNs/infs are dropped to keep indicator pipelines stable.
         """
-        bars = await self.snapshot(symbol)
+        bars = self.snapshot(symbol)
         return bars_to_df(bars)
 
-    async def snapshot_resampled_df(self, symbol: str, rule: str):
+    def snapshot_resampled_df(self, symbol: str, rule: str):
         """
         Resample OHLCV to a higher timeframe (e.g., '5min', '15min').
         """
-        df = await self.snapshot_df(symbol)
+        df = self.snapshot_df(symbol)
         if df is None or df.empty:
             return df
         return resample_ohlcv(df, rule=rule)
@@ -151,13 +158,66 @@ def _ts_utc(dt: datetime | None) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+@dataclass(frozen=True)
+class QuoteEvent:
+    symbol: str
+    ts: datetime
+    ask_prices: list[float] # Levels 1-10
+    ask_sizes: list[float]
+    bid_prices: list[float]
+    bid_sizes: list[float]
+
+class OrderBookBuffer:
+    def __init__(self, maxlen: int = 100) -> None:
+        self._buf: dict[str, deque[QuoteEvent]] = defaultdict(lambda: deque(maxlen=maxlen))
+        self._lock = threading.Lock()
+
+    def append(self, quote: QuoteEvent):
+        with self._lock:
+            self._buf[quote.symbol].append(quote)
+
+    def latest_features(self, symbol: str) -> list[float]:
+        """
+        Returns the 40 features (10 levels of Ask Price/Size, 10 levels of Bid Price/Size).
+        """
+        with self._lock:
+            dq = self._buf.get(symbol)
+            if not dq:
+                return [0.0] * 40
+            q = dq[-1]
+            # Flatten to 40 features: 10 Ask P, 10 Ask S, 10 Bid P, 10 Bid S
+            return (q.ask_prices[:10] + [0.0]*10)[:10] + \
+                   (q.ask_sizes[:10] + [0.0]*10)[:10] + \
+                   (q.bid_prices[:10] + [0.0]*10)[:10] + \
+                   (q.bid_sizes[:10] + [0.0]*10)[:10]
+
 class MarketDataStreamer:
-    def __init__(self, settings: Settings, buffer: BarBuffer) -> None:
+    def __init__(self, settings: Settings, buffer: BarBuffer, book_buffer: OrderBookBuffer | None = None) -> None:
         self._settings = settings
         self._buffer = buffer
+        self._book_buffer = book_buffer
+        self._running = True
+
+    def stop(self) -> None:
+        self._running = False
+
+    async def _on_quote(self, quote) -> None:
+        if self._book_buffer is None:
+            return
+        # Extract 10 levels if available (Alpaca L2 SIP)
+        # Note: Alpaca quotes usually provide top level. 
+        # For full 10 levels, we'd iterate through getattr(quote, 'ask_prices', []) etc.
+        evt = QuoteEvent(
+            symbol=str(getattr(quote, "symbol")),
+            ts=_ts_utc(getattr(quote, "timestamp", None)),
+            ask_prices=[_to_float(getattr(quote, "ask_price", 0.0))],
+            ask_sizes=[_to_float(getattr(quote, "ask_size", 0.0))],
+            bid_prices=[_to_float(getattr(quote, "bid_price", 0.0))],
+            bid_sizes=[_to_float(getattr(quote, "bid_size", 0.0))],
+        )
+        self._book_buffer.append(evt)
 
     async def _on_bar(self, bar) -> None:
-        # alpaca-py bar objects have fields like symbol, timestamp, open, high, low, close, volume, vwap
         evt = BarEvent(
             symbol=str(getattr(bar, "symbol")),
             ts=_ts_utc(getattr(bar, "timestamp", None)),
@@ -168,34 +228,61 @@ class MarketDataStreamer:
             volume=_to_float(getattr(bar, "volume", None)),
             vwap=(None if getattr(bar, "vwap", None) is None else _to_float(getattr(bar, "vwap"))),
         )
-        await self._buffer.append(evt)
+        self._buffer.append(evt)
 
     def run_forever(self) -> None:
-        # New StockDataStream + single subscribe per attempt so we never stack subscriptions
-        # on a half-dead client (a common cause of Alpaca "connection limit exceeded").
         import time as _time
+        from alpaca.data.live.crypto import CryptoDataStream
+        from alpaca.data.live.stock import StockDataStream
+        from alpaca.data.enums import DataFeed
 
         backoff_s = 1.0
-        while True:
-            stream = StockDataStream(
-                self._settings.apca_api_key_id,
-                self._settings.apca_api_secret_key,
-                feed=DataFeed.IEX,
-            )
+        is_crypto = self._settings.asset_class.lower() == "crypto"
+        
+        while self._running:
+            if is_crypto:
+                stream = CryptoDataStream(
+                    self._settings.apca_api_key_id,
+                    self._settings.apca_api_secret_key,
+                )
+            else:
+                stream = StockDataStream(
+                    self._settings.apca_api_key_id,
+                    self._settings.apca_api_secret_key,
+                    feed=DataFeed.IEX,
+                )
+                
             try:
-                stream.subscribe_bars(self._on_bar, *self._settings.symbols)
+                # Filter symbols for crypto (must contain '/') or stocks
+                valid_symbols = []
+                log.info(f"Streamer checking {len(self._settings.symbols)} symbols for {self._settings.asset_class} mode...")
+                for s in self._settings.symbols:
+                    if is_crypto:
+                        if "/" in s: valid_symbols.append(s)
+                    else:
+                        if "/" not in s: valid_symbols.append(s)
+                
+                if not valid_symbols:
+                    log.warning(f"No valid {self._settings.asset_class} symbols found in: {self._settings.symbols[:10]}... Waiting...")
+                    _time.sleep(30)
+                    continue
+
+                log.info(f"Subscribing to {self._settings.asset_class} bars: {valid_symbols}")
+                if is_crypto:
+                    stream.subscribe_bars(self._on_bar, *valid_symbols)
+                else:
+                    stream.subscribe_bars(self._on_bar, *valid_symbols)
+                
                 stream.run()
             except Exception as e:
+                if not self._running:
+                    break
                 if is_connection_or_rate_limit(e):
-                    log.warning(
-                        "data websocket: connection/rate limit — backing off 120s. "
-                        "Stop duplicate bot processes (only one `alpaca_day_bot` per API key).",
-                        extra={"extra_json": {"error": str(e)}},
-                    )
+                    log.warning(f"backoff {self._settings.asset_class} stream: {e}")
                     _time.sleep(120.0)
                     backoff_s = 1.0
                 else:
-                    log.debug("data websocket error: %s", e, exc_info=True)
+                    log.debug("data error: %s", e)
                     _time.sleep(backoff_s)
                     backoff_s = min(60.0, max(1.0, backoff_s * 2.0))
                 continue
@@ -207,17 +294,41 @@ def bars_to_df(bars: Iterable[BarEvent]):
 
     rows = []
     for b in bars:
-        rows.append(
-            {
-                "ts": b.ts,
-                "open": b.open,
-                "high": b.high,
-                "low": b.low,
-                "close": b.close,
-                "volume": b.volume,
-                "vwap": b.vwap,
-            }
-        )
+        if b is None:
+            continue
+        try:
+            ts = getattr(b, "ts", None) or getattr(b, "timestamp", None)
+            o = getattr(b, "open", None)
+            h = getattr(b, "high", None)
+            l = getattr(b, "low", None)
+            c = getattr(b, "close", None)
+            v = getattr(b, "volume", None)
+            vw = getattr(b, "vwap", None)
+        except Exception:
+            ts = o = h = l = c = v = vw = None
+
+        if ts is None and isinstance(b, dict):
+            ts = b.get("ts") or b.get("timestamp")
+            o = b.get("open")
+            h = b.get("high")
+            l = b.get("low")
+            c = b.get("close")
+            v = b.get("volume")
+            vw = b.get("vwap")
+
+        if ts is not None:
+            rows.append(
+                {
+                    "ts": ts,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": v,
+                    "vwap": vw,
+                }
+            )
+            
     if not rows:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "vwap"])
 

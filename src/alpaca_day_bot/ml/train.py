@@ -14,7 +14,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.feature_selection import SelectFromModel
 
 from alpaca_day_bot.ml.dataset import build_signal_label_dataset
 from alpaca_day_bot.ml.executed_dataset import build_executed_trade_dataset
@@ -149,6 +150,15 @@ def train_and_save(
         }
         (outp.with_suffix(".json")).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
+
+    # Remove non-numeric columns (like 'regime') before training
+    # These are used for routing but shouldn't be ML features
+    non_numeric_cols = X.select_dtypes(include=['object']).columns.tolist()
+    if non_numeric_cols:
+        X = X.drop(columns=non_numeric_cols)
+        # Also remove from feature_columns list if it exists in meta
+        if 'feature_columns' in meta:
+            meta['feature_columns'] = [col for col in meta['feature_columns'] if col not in non_numeric_cols]
 
     # Chronological split (reduce leakage): last 25% as test, with a small embargo to reduce overlap.
     n = len(X)
@@ -308,6 +318,65 @@ def train_and_save(
     except Exception:
         lgbm_cal = None
 
+    # XGBoost (if available)
+    xgb_model = None
+    xgb_cal = None
+    try:
+        import xgboost as xgb
+
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=400,
+            learning_rate=0.05,
+            max_depth=6,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=42,
+            use_label_encoder=False,
+            eval_metric='logloss',
+        )
+        xgb_pipe = Pipeline(
+            steps=[
+                ("impute", SimpleImputer(strategy="median")),
+                ("clf", xgb_model),
+            ]
+        )
+        if cv >= 2:
+            xgb_cal = CalibratedClassifierCV(xgb_pipe, method="isotonic", cv=cv)
+            xgb_cal.fit(X_train, y_train)
+        else:
+            xgb_pipe.fit(X_train, y_train)
+            xgb_cal = xgb_pipe
+    except Exception:
+        xgb_cal = None
+
+    # CatBoost (if available)
+    cat_model = None
+    cat_cal = None
+    try:
+        import catboost as cat
+
+        cat_model = cat.CatBoostClassifier(
+            iterations=400,
+            learning_rate=0.05,
+            depth=6,
+            random_seed=42,
+            verbose=False,
+        )
+        cat_pipe = Pipeline(
+            steps=[
+                ("impute", SimpleImputer(strategy="median")),
+                ("clf", cat_model),
+            ]
+        )
+        if cv >= 2:
+            cat_cal = CalibratedClassifierCV(cat_pipe, method="isotonic", cv=cv)
+            cat_cal.fit(X_train, y_train)
+        else:
+            cat_pipe.fit(X_train, y_train)
+            cat_cal = cat_pipe
+    except Exception:
+        cat_cal = None
+
     def eval_model(m):
         proba = m.predict_proba(X_test)[:, 1]
         pred = (proba >= 0.5).astype(int)
@@ -359,6 +428,47 @@ def train_and_save(
         # choose by AUC when available, otherwise accuracy
         if score(m_lgb) >= score(best[2]):
             best = ("lgbm", lgbm_cal, m_lgb, extra_lgb, proba_lgb)
+    if xgb_cal is not None:
+        m_xgb, extra_xgb, proba_xgb = eval_model(xgb_cal)
+        if score(m_xgb) >= score(best[2]):
+            best = ("xgb", xgb_cal, m_xgb, extra_xgb, proba_xgb)
+    if cat_cal is not None:
+        m_cat, extra_cat, proba_cat = eval_model(cat_cal)
+        if score(m_cat) >= score(best[2]):
+            best = ("cat", cat_cal, m_cat, extra_cat, proba_cat)
+
+    # Ensemble method: voting classifier with top 3 models
+    ensemble_model = None
+    ensemble_cal = None
+    models_to_ensemble = []
+    
+    # Collect available calibrated models
+    if lgbm_cal is not None:
+        models_to_ensemble.append(("lgbm", lgbm_cal))
+    if xgb_cal is not None:
+        models_to_ensemble.append(("xgb", xgb_cal))
+    if cat_cal is not None:
+        models_to_ensemble.append(("cat", cat_cal))
+    if rf_model is not None:
+        models_to_ensemble.append(("rf", rf_model))
+    
+    # Create voting ensemble if we have at least 2 models
+    if len(models_to_ensemble) >= 2:
+        try:
+            ensemble_model = VotingClassifier(
+                estimators=models_to_ensemble,
+                voting='soft',
+                n_jobs=1
+            )
+            ensemble_model.fit(X_train, y_train)
+            ensemble_cal = ensemble_model
+            
+            # Evaluate ensemble
+            m_ens, extra_ens, proba_ens = eval_model(ensemble_cal)
+            if score(m_ens) >= score(best[2]):
+                best = ("ensemble", ensemble_cal, m_ens, extra_ens, proba_ens)
+        except Exception:
+            ensemble_cal = None
 
     provider, model, metrics, extra_metrics, proba_best = best
     outp = Path(out_path)

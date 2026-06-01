@@ -41,14 +41,20 @@ def learn_regime_min_proba_map(
         """
         SELECT
           json_extract(s.features_json, '$.regime') AS regime,
-          json_extract(s.features_json, '$.model_proba') AS model_proba,
+          COALESCE(
+            json_extract(s.features_json, '$.model_proba'),
+            json_extract(s.features_json, '$.ml_proba')
+          ) AS model_proba,
           tb.outcome AS tb_outcome,
           f.return_pct AS return_pct
         FROM signals s
         LEFT JOIN triple_barrier_labels tb ON tb.signal_id = s.id
         LEFT JOIN forward_return_labels f ON f.signal_id = s.id
         WHERE (tb.signal_id IS NOT NULL OR f.signal_id IS NOT NULL)
-          AND json_extract(s.features_json, '$.model_proba') IS NOT NULL
+          AND (
+            json_extract(s.features_json, '$.model_proba') IS NOT NULL
+            OR json_extract(s.features_json, '$.ml_proba') IS NOT NULL
+          )
         ORDER BY s.ts ASC
         """
     ).fetchall()

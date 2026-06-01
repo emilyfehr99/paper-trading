@@ -1019,6 +1019,7 @@ def _run_in_window_trading_cycle(
             trading_date=market_day,
             price=last_close,
             stop_distance=stop_dist,
+            ml_proba=feat.get("model_proba"),
         )
         if not rd.allow:
             return
@@ -1767,7 +1768,7 @@ def run(
         )
 
     tc = make_trading_client(settings)
-    executor = OrderExecutor(tc)
+    executor = OrderExecutor(tc, settings=settings, ledger=ledger)
 
     buffer = BarBuffer(maxlen=int(settings.bar_buffer_maxlen))
     md = MarketDataStreamer(settings, buffer)
@@ -1913,15 +1914,8 @@ def run(
     # Market data: REST polling avoids opening a second Alpaca websocket (trading stream uses one).
     md_mode = (settings.market_data_mode or "rest").strip().lower()
     if scheduled_tick:
-        asset_class = (getattr(settings, "asset_class", "equity") or "equity").strip().lower()
-        if asset_class == "crypto":
-            from alpaca_day_bot.data.crypto_rest_bars import CryptoRestBarPoller
-
-            rp = CryptoRestBarPoller(settings, buffer)
-        else:
-            from alpaca_day_bot.data.rest_bars import RestBarPoller
-
-            rp = RestBarPoller(settings, buffer)
+        from alpaca_day_bot.data.rest_bars import RestBarPoller
+        rp = RestBarPoller(settings, buffer)
         warmed = rp.warm_buffer(rounds=2, pause_s=1.0)
         log.info("scheduled_tick rest bars warmed events=%s", warmed)
     elif md_mode == "websocket":
@@ -2087,7 +2081,7 @@ def run(
                     ledger=ledger,
                     executor=executor,
                     buffer=buffer,
-                    strategy=strategy,
+                    strategy=strategy_cons,
                     risk=risk,
                     t0=t0,
                     market_day=market_day,

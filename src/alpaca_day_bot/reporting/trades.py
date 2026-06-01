@@ -51,7 +51,8 @@ def _parse_dt(s: str) -> datetime:
 
 
 def _rows_to_fills(rows: list[tuple[str, str, str]]) -> list[Fill]:
-    fills: list[Fill] = []
+    fills_by_order: dict[str, Fill] = {}
+    non_order_fills: list[Fill] = []
     for ts_s, event, raw_json in rows:
         try:
             payload = json.loads(raw_json)
@@ -73,16 +74,29 @@ def _rows_to_fills(rows: list[tuple[str, str, str]]) -> list[Fill]:
             continue
         if qty_f <= 0 or px_f <= 0:
             continue
-        fills.append(
-            Fill(
-                ts=_parse_dt(ts_s),
-                symbol=sym,
-                side=side,
-                qty=qty_f,
-                px=px_f,
-                order_id=(None if order.get("id") is None else str(order.get("id"))),
-            )
+        
+        oid = order.get("id")
+        fill_ts = _parse_dt(ts_s)
+        fill_obj = Fill(
+            ts=fill_ts,
+            symbol=sym,
+            side=side,
+            qty=qty_f,
+            px=px_f,
+            order_id=(None if oid is None else str(oid)),
         )
+        if oid is not None:
+            oid_str = str(oid)
+            if oid_str in fills_by_order:
+                existing = fills_by_order[oid_str]
+                if qty_f > existing.qty or (qty_f == existing.qty and fill_ts > existing.ts):
+                    fills_by_order[oid_str] = fill_obj
+            else:
+                fills_by_order[oid_str] = fill_obj
+        else:
+            non_order_fills.append(fill_obj)
+            
+    fills = list(fills_by_order.values()) + non_order_fills
     fills.sort(key=lambda f: f.ts)
     return fills
 

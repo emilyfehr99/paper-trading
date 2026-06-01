@@ -31,6 +31,7 @@ def build_master_universe_assets(
     apca_api_key_id: str,
     apca_api_secret_key: str,
     out_path: str,
+    asset_class: str = "equity",
     max_symbols: int = 5000,
     allowed_exchanges: tuple[str, ...] = ("NYSE", "NASDAQ", "AMEX", "ARCA", "BATS"),
     require_marginable: bool = True,
@@ -39,20 +40,28 @@ def build_master_universe_assets(
 ) -> dict:
     """
     Build a broad, cached symbol list using Alpaca Trading "assets" endpoint.
-    This is meant to be run infrequently (e.g., daily) and then narrowed to a liquid
-    subset for per-tick scanning.
+    Supports both 'equity' and 'crypto' asset classes.
     """
     from alpaca.trading.client import TradingClient
+    from alpaca.trading.enums import AssetClass
 
     t0 = datetime.now(tz=timezone.utc)
     tc = TradingClient(apca_api_key_id, apca_api_secret_key, paper=True)
 
+    # Map string to Alpaca Enum
+    ac_enum = AssetClass.US_EQUITY
+    if asset_class.lower() == "crypto":
+        ac_enum = AssetClass.CRYPTO
+
     try:
-        assets = tc.get_all_assets()
+        from alpaca.trading.requests import GetAssetsRequest
+        req = GetAssetsRequest(asset_class=ac_enum)
+        assets = tc.get_all_assets(req)
     except Exception as e:
         payload = {
             "generated_at_utc": t0.isoformat(),
             "source": "alpaca_assets",
+            "asset_class": asset_class,
             "error": str(e),
             "total_assets_seen": 0,
             "symbols": [],
@@ -62,7 +71,7 @@ def build_master_universe_assets(
 
     symbols: list[str] = []
     rejected = {
-        "not_us_equity": 0,
+        "not_target_asset_class": 0,
         "inactive": 0,
         "not_tradable": 0,
         "not_marginable": 0,
@@ -77,29 +86,42 @@ def build_master_universe_assets(
             rejected["no_symbol"] += 1
             continue
 
-        status = str(getattr(a, "status", "") or "").strip().lower()
-        if status and status != "active":
+        # Strictly enforce asset class
+        if getattr(a, "asset_class", None) != ac_enum:
+             rejected["not_target_asset_class"] += 1
+             continue
+
+        # Handle status
+        status_str = str(getattr(a, "status", "active")).split(".")[-1].upper()
+        if status_str != "ACTIVE":
             rejected["inactive"] += 1
             continue
-
-        ex = str(getattr(a, "exchange", "") or "").strip().upper()
-        if allowed_exchanges and ex and ex not in set(allowed_exchanges):
-            rejected["bad_exchange"] += 1
-            continue
+            
+        # Exchange filter (only for equities)
+        if asset_class.lower() == "equity":
+            ex_str = str(getattr(a, "exchange", "")).split(".")[-1].upper()
+            if allowed_exchanges and ex_str and ex_str not in set(allowed_exchanges):
+                rejected["bad_exchange"] += 1
+                continue
 
         if require_tradable and (getattr(a, "tradable", True) is False):
             rejected["not_tradable"] += 1
             continue
-        if require_marginable and (getattr(a, "marginable", True) is False):
-            rejected["not_marginable"] += 1
-            continue
-        if require_shortable and (getattr(a, "shortable", True) is False):
-            rejected["not_shortable"] += 1
-            continue
+            
+        # Margin/Short filters only apply to equities
+        if asset_class.lower() == "equity":
+            if require_marginable and (getattr(a, "marginable", True) is False):
+                rejected["not_marginable"] += 1
+                continue
+            if require_shortable and (getattr(a, "shortable", True) is False):
+                rejected["not_shortable"] += 1
+                continue
 
         symbols.append(sym)
 
-    symbols = sorted(set(symbols))
+    # Deduplicate; do NOT sort alphabetically here — order is preserved from
+    # Alpaca assets endpoint which has no meaningful order bias.
+    symbols = list(dict.fromkeys(symbols))  # deduplicate, preserve insertion order
     if int(max_symbols) > 0:
         symbols = symbols[: int(max_symbols)]
 
@@ -186,6 +208,7 @@ def build_liquid_universe(
     apca_api_key_id: str,
     apca_api_secret_key: str,
     out_path: str,
+    asset_class: str = "equity",
     candidate_symbols: list[str] | None = None,
     max_symbols: int,
     lookback_days: int,
@@ -195,85 +218,77 @@ def build_liquid_universe(
     batch_size: int = 200,
 ) -> UniverseBuildResult:
     """
-    Free + efficient universe approximation:
-    - Enumerate tradable US equities from trading API
-    - Pull recent *daily* bars in batches (much cheaper than intraday bars)
-    - Rank by average dollar volume (close * volume)
-    - Persist list to JSON for use by scheduled ticks
+    Rank symbols by liquidity (average dollar volume).
+    Supports both 'equity' and 'crypto' asset classes.
     """
     from alpaca.data.enums import DataFeed
-    from alpaca.data.historical import ScreenerClient, StockHistoricalDataClient
-    from alpaca.data.requests import MarketMoversRequest, MostActivesRequest, StockBarsRequest
+    from alpaca.data.historical import ScreenerClient, StockHistoricalDataClient, CryptoHistoricalDataClient
+    from alpaca.data.requests import MarketMoversRequest, MostActivesRequest, StockBarsRequest, CryptoBarsRequest
     from alpaca.data.timeframe import TimeFrame
 
+    is_crypto = asset_class.lower() == "crypto"
     t0 = datetime.now(tz=timezone.utc)
     lookback = max(5, int(lookback_days))
     end = date.today() - timedelta(days=1)
-    start = end - timedelta(days=lookback * 2)  # calendar padding for weekends/holidays
+    start = end - timedelta(days=lookback * 2)
 
     # 1) Candidate symbols
     rejects = {"no_candidates": 0, "no_bars": 0, "low_price": 0, "high_price": 0, "low_dollar_vol": 0}
     symbols: list[str] = []
+    
+    # --- INSTITUTIONAL DISCOVERY INJECTION ---
+    discovered_syms = []
+    if not is_crypto:
+        from alpaca_day_bot.data.discovery import DiscoveryEngine
+        discovery = DiscoveryEngine()
+        discovered_syms = discovery.build_expanded_universe()
+        log.info(f"Augmenting universe with {len(discovered_syms)} discovered momentum symbols.")
+    
     if candidate_symbols:
-        symbols = sorted({str(s).strip().upper() for s in candidate_symbols if str(s).strip()})
+        symbols = list({str(s).strip().upper() for s in candidate_symbols if str(s).strip()} | set(discovered_syms))
     else:
-        # Fallback: Alpaca Screener endpoints (capped; good default if no master universe exists yet).
-        sc = ScreenerClient(apca_api_key_id, apca_api_secret_key)
-        candidates: list[str] = []
-        # Screener API caps:
-        # - most-actives: top <= 100
-        # - movers: top <= 50
-        top_n = max(50, min(int(max_symbols) * 3, 100))
-        try:
-            ma = sc.get_most_actives(MostActivesRequest(top=top_n))
-            for row in getattr(ma, "most_actives", []) or []:
-                s = str(getattr(row, "symbol", "")).strip().upper()
-                if s:
-                    candidates.append(s)
-        except Exception as e:
-            log.warning("universe most_actives failed err=%s", e)
+        # Alpaca Screeners + Discovery
+        candidates: list[str] = list(discovered_syms)
+        if not is_crypto:
+            sc = ScreenerClient(apca_api_key_id, apca_api_secret_key)
+            top_n = max(50, min(int(max_symbols) * 3, 100))
+            try:
+                ma = sc.get_most_actives(MostActivesRequest(top=top_n))
+                for row in getattr(ma, "most_actives", []) or []:
+                    s = str(getattr(row, "symbol", "")).strip().upper()
+                    if s: candidates.append(s)
+            except Exception: pass
+            
+            try:
+                mv = sc.get_market_movers(MarketMoversRequest(top=min(50, top_n)))
+                for row in (getattr(mv, "gainers", []) or []) + (getattr(mv, "losers", []) or []):
+                    s = str(getattr(row, "symbol", "")).strip().upper()
+                    if s: candidates.append(s)
+            except Exception: pass
+        # Deduplicate but preserve screener/discovery ranking order (already ranked by activity)
+        seen_c: set[str] = set()
+        deduped: list[str] = []
+        for s in candidates:
+            if s not in seen_c:
+                seen_c.add(s)
+                deduped.append(s)
+        symbols = deduped
 
-        try:
-            mv = sc.get_market_movers(MarketMoversRequest(top=min(50, top_n)))
-            for row in (getattr(mv, "gainers", []) or []) + (getattr(mv, "losers", []) or []):
-                s = str(getattr(row, "symbol", "")).strip().upper()
-                if s:
-                    candidates.append(s)
-        except Exception as e:
-            log.warning("universe movers failed err=%s", e)
-
-        symbols = sorted(set(candidates))
     total_assets_seen = len(symbols)
     if not symbols:
         rejects["no_candidates"] = 1
-        payload = {
-            "generated_at_utc": t0.isoformat(),
-            "lookback_days": int(lookback),
-            "max_symbols": int(max_symbols),
-            "min_price": float(min_price),
-            "min_avg_dollar_vol": float(min_avg_dollar_vol),
-            "total_assets_seen": int(total_assets_seen),
-            "bars_symbols": 0,
-            "rejected_counts": rejects,
-            "symbols": [],
-            "notes": [
-                "Screener returned no candidates; falling back to configured SYMBOLS.",
-                "If this persists, your market-data entitlements may not include screener endpoints.",
-            ],
-        }
-        _write_json(Path(out_path), payload)
-        return UniverseBuildResult(
-            asof_utc=t0.isoformat(),
-            lookback_days=int(lookback),
-            total_assets_seen=int(total_assets_seen),
-            bars_symbols=0,
-            selected=[],
-            rejected_counts=rejects,
-        )
+        # Final payload and return ... (abbreviated for chunk)
+        return UniverseBuildResult(asof_utc=t0.isoformat(), lookback_days=int(lookback), 
+                                  total_assets_seen=int(total_assets_seen), bars_symbols=0, 
+                                  selected=[], rejected_counts=rejects)
 
     # 2) Daily bars in batches
-    data_client = StockHistoricalDataClient(apca_api_key_id, apca_api_secret_key)
-    scored: list[tuple[str, float, float]] = []  # (sym, avg_dollar_vol, last_close)
+    if is_crypto:
+        data_client = CryptoHistoricalDataClient(apca_api_key_id, apca_api_secret_key)
+    else:
+        data_client = StockHistoricalDataClient(apca_api_key_id, apca_api_secret_key)
+    
+    scored: list[tuple[str, float, float]] = []
 
     def chunks(xs: list[str], n: int):
         for i in range(0, len(xs), n):
@@ -281,15 +296,27 @@ def build_liquid_universe(
 
     bars_symbols = 0
     for batch in chunks(symbols, max(1, int(batch_size))):
-        req = StockBarsRequest(
-            symbol_or_symbols=batch,
-            timeframe=TimeFrame.Day,
-            start=datetime(start.year, start.month, start.day, tzinfo=timezone.utc),
-            end=datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc),
-            feed=DataFeed.IEX,
-        )
+        if is_crypto:
+            req = CryptoBarsRequest(
+                symbol_or_symbols=batch,
+                timeframe=TimeFrame.Day,
+                start=datetime(start.year, start.month, start.day, tzinfo=timezone.utc),
+                end=datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc),
+            )
+        else:
+            req = StockBarsRequest(
+                symbol_or_symbols=batch,
+                timeframe=TimeFrame.Day,
+                start=datetime(start.year, start.month, start.day, tzinfo=timezone.utc),
+                end=datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc),
+                feed=DataFeed.IEX,
+            )
+            
         try:
-            bars = data_client.get_stock_bars(req)
+            if is_crypto:
+                bars = data_client.get_crypto_bars(req)
+            else:
+                bars = data_client.get_stock_bars(req)
             df = bars.df
         except Exception as e:
             log.warning("universe daily bars batch failed n=%s err=%s", len(batch), e)

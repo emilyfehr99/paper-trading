@@ -7,11 +7,15 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+import os
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=os.environ.get("ENV_FILE", ".env"),
         env_file_encoding="utf-8",
-        extra="ignore",
+        case_sensitive=False,
+        extra="allow",
+        protected_namespaces=("settings_",),
     )
 
     apca_api_key_id: str = Field(alias="APCA_API_KEY_ID")
@@ -87,6 +91,8 @@ class Settings(BaseSettings):
     per_symbol_cooldown_s: int = Field(default=600, alias="PER_SYMBOL_COOLDOWN_S")
     # Stop opening new trades once equity is up this much vs session start (0 = off).
     daily_profit_target_usd: float = Field(default=100.0, alias="DAILY_PROFIT_TARGET_USD")
+    be_trigger: float = Field(default=1.0, alias="BE_TRIGGER")
+    trail_trigger: float = Field(default=2.0, alias="TRAIL_TRIGGER")
 
     # Realism (modeled; does not affect Alpaca fills)
     slippage_bps: float = Field(default=1.0, alias="SLIPPAGE_BPS")
@@ -140,7 +146,7 @@ class Settings(BaseSettings):
 
     # Exits (bracket-like)
     stop_loss_atr_mult: float = Field(default=1.5, alias="STOP_LOSS_ATR_MULT")
-    take_profit_r_mult: float = Field(default=1.5, alias="TAKE_PROFIT_R_MULT")
+    take_profit_r_mult: float = Field(default=3.0, alias="TAKE_PROFIT_R_MULT")
 
     # Smarter exits (in addition to TP/SL brackets)
     max_hold_minutes: float = Field(default=0.0, alias="MAX_HOLD_MINUTES")  # 0 disables time-exit
@@ -186,6 +192,7 @@ class Settings(BaseSettings):
     # Storage
     state_dir: str = Field(default="state", alias="STATE_DIR")
     reports_dir: str = Field(default="reports", alias="REPORTS_DIR")
+    prometheus_port: int = Field(default=8000, alias="PROMETHEUS_PORT")
     # Optional path to day_trade_recommendations_*.json; default tries reports/day_trade_recommendations_latest.json
     recommendations_json: str | None = Field(default=None, alias="RECOMMENDATIONS_JSON")
 
@@ -195,6 +202,8 @@ class Settings(BaseSettings):
     # For limit entries, move limit away from last price by this many bps.
     # BUY uses (1 - bps/10_000), SHORT uses (1 + bps/10_000). 0 = use last price.
     limit_entry_offset_bps: float = Field(default=0.0, alias="LIMIT_ENTRY_OFFSET_BPS")
+
+    client_order_id_prefix: str = Field(default="adbot-", alias="CLIENT_ORDER_ID_PREFIX")
 
     # Accuracy guards / gating
     # Avoid stacking highly correlated positions (0 disables).
@@ -236,6 +245,8 @@ class Settings(BaseSettings):
         return ZoneInfo(self.market_tz)
 
 
-def load_settings() -> Settings:
-    return Settings()  # type: ignore[call-arg]
+def load_settings(env_file: str | None = None) -> Settings:
+    if env_file:
+        return Settings(_env_file=env_file) # type: ignore
+    return Settings() # type: ignore
 

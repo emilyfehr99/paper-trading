@@ -42,6 +42,10 @@ class TradingUpdatesStreamer:
     ) -> None:
         self._settings = settings
         self._on_update = on_update
+        self._running = True
+
+    def stop(self) -> None:
+        self._running = False
 
     def _subscribe(self, stream: TradingStream) -> None:
         async def _handler(data) -> None:
@@ -67,7 +71,7 @@ class TradingUpdatesStreamer:
         import time as _time
 
         backoff_s = 1.0
-        while True:
+        while self._running:
             stream = TradingStream(
                 self._settings.apca_api_key_id,
                 self._settings.apca_api_secret_key,
@@ -77,6 +81,8 @@ class TradingUpdatesStreamer:
             try:
                 stream.run()
             except Exception as e:
+                if not self._running:
+                    break
                 if is_connection_or_rate_limit(e):
                     log.warning(
                         "trading websocket: connection/rate limit — backing off 120s. "

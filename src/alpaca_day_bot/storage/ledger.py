@@ -72,7 +72,9 @@ class Ledger:
               symbol TEXT NOT NULL,
               action TEXT NOT NULL,
               reason TEXT NOT NULL,
-              features_json TEXT
+              features_json TEXT,
+              explainability_json TEXT,
+              context_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS forward_return_labels (
@@ -94,6 +96,8 @@ class Ledger:
               outcome TEXT NOT NULL, -- tp | sl | timeout
               realized_return_pct REAL NOT NULL,
               horizon_minutes REAL NOT NULL,
+              failure_analysis_json TEXT,
+              context_json TEXT,
               FOREIGN KEY (signal_id) REFERENCES signals(id)
             );
 
@@ -110,9 +114,62 @@ class Ledger:
               pnl_usd REAL,
               meta_json TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS executed_trade_reviews (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts_close TEXT NOT NULL,
+              symbol TEXT NOT NULL,
+              realized_pnl_usd REAL NOT NULL,
+              qty_closed REAL NOT NULL,
+              entry_ts TEXT,
+              exit_ts TEXT,
+              entry_avg_price REAL,
+              exit_price REAL,
+              signal_id INTEGER,
+              signal_reason TEXT,
+              tags_json TEXT,
+              features_json TEXT,
+              context_json TEXT,
+              raw_json TEXT
+            );
             """
             )
             self._conn.commit()
+
+            # Dynamic migrations to handle existing sqlite databases safely
+            # Ensure signals context_json and explainability_json exist
+            cursor = self._conn.execute("PRAGMA table_info(signals)")
+            cols = [row[1] for row in cursor.fetchall()]
+            if "context_json" not in cols:
+                self._conn.execute("ALTER TABLE signals ADD COLUMN context_json TEXT")
+                self._conn.commit()
+            if "explainability_json" not in cols:
+                self._conn.execute("ALTER TABLE signals ADD COLUMN explainability_json TEXT")
+                self._conn.commit()
+
+            # Ensure triple_barrier_labels context_json and failure_analysis_json exist
+            cursor = self._conn.execute("PRAGMA table_info(triple_barrier_labels)")
+            cols = [row[1] for row in cursor.fetchall()]
+            if "context_json" not in cols:
+                self._conn.execute("ALTER TABLE triple_barrier_labels ADD COLUMN context_json TEXT")
+                self._conn.commit()
+            if "failure_analysis_json" not in cols:
+                self._conn.execute("ALTER TABLE triple_barrier_labels ADD COLUMN failure_analysis_json TEXT")
+                self._conn.commit()
+
+            # Ensure executed_trade_reviews context_json exists
+            cursor = self._conn.execute("PRAGMA table_info(executed_trade_reviews)")
+            cols = [row[1] for row in cursor.fetchall()]
+            if "context_json" not in cols:
+                self._conn.execute("ALTER TABLE executed_trade_reviews ADD COLUMN context_json TEXT")
+                self._conn.commit()
+
+            # Ensure trade_updates slippage_pct exists
+            cursor = self._conn.execute("PRAGMA table_info(trade_updates)")
+            cols = [row[1] for row in cursor.fetchall()]
+            if "slippage_pct" not in cols:
+                self._conn.execute("ALTER TABLE trade_updates ADD COLUMN slippage_pct REAL")
+                self._conn.commit()
 
     def _ensure_audit_file(self) -> None:
         """Create transactions.jsonl on startup so `alpaca-watch-trades` can tail immediately."""
@@ -123,11 +180,32 @@ class Ledger:
 
     def record_trade_update(self, evt: TradeUpdateEvent) -> None:
         payload = json.dumps(asdict(evt), default=str)
+        slippage_pct = None
+        
+        # Calculate Slippage on 'fill' events for entry orders
+        if evt.event == "fill" and evt.filled_avg_price and evt.filled_avg_price > 0:
+            with self._lock:
+                # Find the original intent to get the signaled price
+                orig = self._conn.execute(
+                    "SELECT side, stop_price FROM order_intents WHERE alpaca_order_id = ? OR client_order_id = ?",
+                    (evt.order_id, evt.client_order_id)
+                ).fetchone()
+                
+                if orig:
+                    side, signaled_price = orig
+                    if signaled_price and signaled_price > 0:
+                        # Buy slippage: (Fill - Signal) / Signal (positive is bad)
+                        # Sell slippage: (Signal - Fill) / Signal (positive is bad)
+                        if side.lower() == "buy":
+                            slippage_pct = (evt.filled_avg_price - signaled_price) / signaled_price
+                        else:
+                            slippage_pct = (signaled_price - evt.filled_avg_price) / signaled_price
+
         with self._lock:
             self._conn.execute(
                 """
-            INSERT INTO trade_updates (ts, event, symbol, order_id, client_order_id, filled_qty, filled_avg_price, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO trade_updates (ts, event, symbol, order_id, client_order_id, filled_qty, filled_avg_price, slippage_pct, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     evt.ts.isoformat(),
@@ -137,6 +215,7 @@ class Ledger:
                     evt.client_order_id,
                     evt.filled_qty,
                     evt.filled_avg_price,
+                    slippage_pct,
                     payload,
                 ),
             )
@@ -230,7 +309,7 @@ class Ledger:
     def submitted_entry_stats_for_trading_date(
         self, market_day: date, tz: ZoneInfo
     ) -> dict[str, Any]:
-        """Submitted entry intents on `market_day` in `tz` (BUY or short SELL)."""
+        """Submitted entry intents on `market_day` in `tz` (with fallback to actual fills)."""
         start = datetime.combine(market_day, time(0, 0, 0), tzinfo=tz).astimezone(timezone.utc)
         end = start + timedelta(days=1)
         start_s = start.isoformat()
@@ -252,15 +331,50 @@ class Ledger:
             ts_p = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
             if ts_p.tzinfo is None:
                 ts_p = ts_p.replace(tzinfo=timezone.utc)
-            last_by_symbol[str(sym)] = ts_p
-        return {"count": len(rows), "last_by_symbol": last_by_symbol}
+            last_by_symbol[str(sym).strip().upper()] = ts_p
+
+        # Fallback to trade_updates to catch fills that might not have a submitted=1 intent row
+        try:
+            with self._lock:
+                cur_fills = self._conn.execute(
+                    """
+                SELECT ts, symbol, raw_json FROM trade_updates
+                WHERE event IN ('fill', 'filled') AND ts >= ? AND ts < ?
+                    """,
+                    (start_s, end_s),
+                )
+                fill_rows = cur_fills.fetchall()
+            for f_ts, f_sym, f_raw in fill_rows:
+                if not f_sym:
+                    continue
+                try:
+                    obj = json.loads(f_raw) if isinstance(f_raw, str) else f_raw
+                    side = obj.get("payload", {}).get("order", {}).get("side") or obj.get("order", {}).get("side")
+                    if side and side.lower() == "buy":
+                        f_ts_str = f_ts.replace("Z", "+00:00")
+                        if " " in f_ts_str and "+" not in f_ts_str:
+                            f_ts_p = datetime.strptime(f_ts_str[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        else:
+                            f_ts_p = datetime.fromisoformat(f_ts_str)
+                        if f_ts_p.tzinfo is None:
+                            f_ts_p = f_ts_p.replace(tzinfo=timezone.utc)
+                        
+                        sym_str = str(f_sym).strip().upper()
+                        if sym_str not in last_by_symbol or f_ts_p > last_by_symbol[sym_str]:
+                            last_by_symbol[sym_str] = f_ts_p
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return {"count": len(last_by_symbol), "last_by_symbol": last_by_symbol}
 
     def last_submitted_entry_intents_for_trading_date(
         self, market_day: date, tz: ZoneInfo
     ) -> dict[str, dict[str, Any]]:
         """
         Return latest submitted entry intent per symbol for the day, including raw_json.
-        Used for dynamic hold-time targets and exit logic.
+        With fallback to trade_updates fills if missing in order_intents.
         """
         start = datetime.combine(market_day, time(0, 0, 0), tzinfo=tz).astimezone(timezone.utc)
         end = start + timedelta(days=1)
@@ -292,7 +406,47 @@ class Ledger:
                 extra = (j.get("extra") or {}) if isinstance(j, dict) else {}
             except Exception:
                 extra = {}
-            out[str(sym)] = {"ts": ts_p, "side": side, "extra": extra}
+            out[str(sym).strip().upper()] = {"ts": ts_p, "side": side, "extra": extra}
+
+        # Fallback to trade_updates to catch fills that might not have a submitted=1 intent row
+        try:
+            with self._lock:
+                cur_fills = self._conn.execute(
+                    """
+                SELECT symbol, ts, raw_json FROM trade_updates
+                WHERE event IN ('fill', 'filled') AND ts >= ? AND ts < ?
+                ORDER BY ts
+                    """,
+                    (start_s, end_s),
+                )
+                fill_rows = cur_fills.fetchall()
+            for f_sym, f_ts, f_raw in fill_rows:
+                if not f_sym:
+                    continue
+                try:
+                    obj = json.loads(f_raw) if isinstance(f_raw, str) else f_raw
+                    side = obj.get("payload", {}).get("order", {}).get("side") or obj.get("order", {}).get("side")
+                    if side and side.lower() == "buy":
+                        sym_str = str(f_sym).strip().upper()
+                        f_ts_str = f_ts.replace("Z", "+00:00")
+                        if " " in f_ts_str and "+" not in f_ts_str:
+                            f_ts_p = datetime.strptime(f_ts_str[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        else:
+                            f_ts_p = datetime.fromisoformat(f_ts_str)
+                        if f_ts_p.tzinfo is None:
+                            f_ts_p = f_ts_p.replace(tzinfo=timezone.utc)
+                        
+                        if sym_str not in out or f_ts_p > out[sym_str]["ts"]:
+                            out[sym_str] = {
+                                "ts": f_ts_p,
+                                "side": side,
+                                "extra": {"target_hold_minutes": 180.0}
+                            }
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         return out
 
     def record_signal(
@@ -303,12 +457,14 @@ class Ledger:
         action: str,
         reason: str,
         features: dict[str, Any] | None = None,
+        explainability: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
                 """
-            INSERT INTO signals (ts, symbol, action, reason, features_json)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO signals (ts, symbol, action, reason, features_json, explainability_json, context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ts.isoformat(),
@@ -316,6 +472,8 @@ class Ledger:
                     action,
                     reason,
                     (None if features is None else json.dumps(features, default=str)),
+                    (None if explainability is None else json.dumps(explainability, default=str)),
+                    (None if context is None else json.dumps(context, default=str)),
                 ),
             )
             self._conn.commit()
@@ -595,6 +753,7 @@ class Ledger:
         outcome: str,
         realized_return_pct: float,
         horizon_minutes: float,
+        context: dict[str, Any] | None = None,
     ) -> None:
         out = (outcome or "").strip().lower()
         if out not in ("tp", "sl", "timeout"):
@@ -603,8 +762,8 @@ class Ledger:
             self._conn.execute(
                 """
             INSERT OR REPLACE INTO triple_barrier_labels
-              (signal_id, evaluated_ts, entry_close, tp_price, sl_price, outcome, realized_return_pct, horizon_minutes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              (signal_id, evaluated_ts, entry_close, tp_price, sl_price, outcome, realized_return_pct, horizon_minutes, context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(signal_id),
@@ -615,7 +774,53 @@ class Ledger:
                     str(out),
                     float(realized_return_pct),
                     float(horizon_minutes),
+                    (None if context is None else json.dumps(context, default=str)),
                 ),
             )
             self._conn.commit()
-
+    def record_executed_trade_review(
+        self,
+        *,
+        ts_close: datetime,
+        symbol: str,
+        realized_pnl_usd: float,
+        qty_closed: float,
+        entry_ts: datetime | None = None,
+        exit_ts: datetime | None = None,
+        entry_avg_price: float | None = None,
+        exit_price: float | None = None,
+        signal_id: int | None = None,
+        signal_reason: str | None = None,
+        tags_json: str | None = None,
+        features_json: str | None = None,
+        context_json: str | None = None,
+        raw_json: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+            INSERT INTO executed_trade_reviews (
+              ts_close, symbol, realized_pnl_usd, qty_closed, entry_ts, exit_ts,
+              entry_avg_price, exit_price, signal_id, signal_reason, tags_json,
+              features_json, context_json, raw_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ts_close.isoformat(),
+                    symbol,
+                    float(realized_pnl_usd),
+                    float(qty_closed),
+                    entry_ts.isoformat() if entry_ts else None,
+                    exit_ts.isoformat() if exit_ts else None,
+                    float(entry_avg_price) if entry_avg_price else None,
+                    float(exit_price) if exit_price else None,
+                    int(signal_id) if signal_id else None,
+                    signal_reason,
+                    tags_json,
+                    features_json,
+                    context_json,
+                    raw_json or "{}",
+                ),
+            )
+            self._conn.commit()

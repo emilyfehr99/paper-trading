@@ -25,6 +25,7 @@ dependencies = [
 alpaca-day-bot = "alpaca_day_bot.main:cli"
 alpaca-watch-trades = "alpaca_day_bot.watch_trades:main"
 alpaca-ml-research = "alpaca_day_bot.research_ml.cli:main"
+alpaca-aetheris-bot = "alpaca_day_bot.aetheris_bot:main"
 
 [build-system]
 requires = ["setuptools>=68"]
