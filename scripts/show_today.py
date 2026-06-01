@@ -39,7 +39,7 @@ def main():
             total_unrealized += unrealized
             
         # 2. Fetch Today's Orders
-        req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=50)
+        req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=200)
         orders = client.get_orders(filter=req)
         
         today = datetime.date.today()
