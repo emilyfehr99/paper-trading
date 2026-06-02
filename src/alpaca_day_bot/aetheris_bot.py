@@ -1030,6 +1030,7 @@ class AetherisBotPro:
         - Moves stop-loss to Break-Even at 0.7R (aggressive) / 1.5R.
         - Dynamically trails stop-loss at 1.2R (aggressive) / 3.0R to lock in profits.
         - Liquidates stagnant positions exceeding MAX_HOLD_MINUTES (Time-Stops).
+        - Alligator Jaws Close Exit: Exit positions when trend weakens based on Alligator indicator.
         """
         try:
             from alpaca.trading.requests import GetOrdersRequest
@@ -1039,6 +1040,7 @@ class AetherisBotPro:
             trail_trigger = getattr(self.settings, "trail_trigger", 2.0)
             max_hold = float(getattr(self.settings, "max_hold_minutes", 0.0) or 0.0)
             dynamic_hold = bool(getattr(self.settings, "dynamic_hold_enabled", True))
+            alligator_exit_enabled = bool(getattr(self.settings, "alligator_exit_enabled", True))
             
             # Fetch latest intents for the day to check entry timestamps
             tz = ZoneInfo(self.settings.market_tz or "America/Chicago")
@@ -1049,6 +1051,77 @@ class AetherisBotPro:
             positions = self.executor._tc.get_all_positions()
             for p in positions:
                 sym = p.symbol
+                
+                # --- ALLIGATOR JAWS CLOSE EXIT ---
+                if alligator_exit_enabled:
+                    try:
+                        df = self.buffer.snapshot_df(sym)
+                        if df is not None and len(df) >= 35:
+                            # Calculate Alligator indicators
+                            alligator_jaw = ta.sma(df["close"], length=13).shift(8)
+                            alligator_teeth = ta.sma(df["close"], length=8).shift(5)
+                            alligator_lips = ta.sma(df["close"], length=5).shift(3)
+                            atr = ta.atr(df["high"], df["low"], df["close"], length=14)
+                            
+                            if all(alligator_jaw.iloc[-1:].notna().all() and 
+                                   alligator_teeth.iloc[-1:].notna().all() and 
+                                   alligator_lips.iloc[-1:].notna().all() and
+                                   atr.iloc[-1:].notna().all()):
+                                
+                                jaw = float(alligator_jaw.iloc[-1])
+                                teeth = float(alligator_teeth.iloc[-1])
+                                lips = float(alligator_lips.iloc[-1])
+                                atr_val = float(atr.iloc[-1])
+                                close = float(df["close"].iloc[-1])
+                                qty = float(p.qty)
+                                
+                                # Calculate spread and convergence
+                                spread = max(jaw, teeth, lips) - min(jaw, teeth, lips)
+                                is_sleeping = spread < (0.3 * atr_val)
+                                
+                                # Check exit conditions based on position side
+                                should_exit = False
+                                exit_reason = ""
+                                
+                                if qty > 0:  # Long Position
+                                    if lips < teeth or is_sleeping or close < teeth:
+                                        should_exit = True
+                                        if lips < teeth:
+                                            exit_reason = "lips_below_teeth"
+                                        elif is_sleeping:
+                                            exit_reason = "sleeping_alligator"
+                                        elif close < teeth:
+                                            exit_reason = "price_below_teeth"
+                                elif qty < 0:  # Short Position
+                                    if lips > teeth or is_sleeping or close > teeth:
+                                        should_exit = True
+                                        if lips > teeth:
+                                            exit_reason = "lips_above_teeth"
+                                        elif is_sleeping:
+                                            exit_reason = "sleeping_alligator"
+                                        elif close > teeth:
+                                            exit_reason = "price_above_teeth"
+                                
+                                if should_exit:
+                                    log.info(f"[bold red]ALLIGATOR EXIT:[/bold red] Jaws closed on {sym} ({exit_reason}). Liquidating position.")
+                                    res = self.executor.close_position(sym)
+                                    now_utc = datetime.now(timezone.utc)
+                                    self.ledger.record_order_intent(
+                                        ts=now_utc,
+                                        symbol=sym,
+                                        side="close",
+                                        notional_usd=0.0,
+                                        stop_price=0.0,
+                                        take_profit_price=0.0,
+                                        client_order_id=None,
+                                        alpaca_order_id=res.alpaca_order_id,
+                                        submitted=res.submitted,
+                                        reason=f"alligator_exit:{exit_reason}",
+                                        extra={"action": "EXIT_ALLIGATOR", "exit_reason": exit_reason},
+                                    )
+                                    continue  # Skip trailing stop logic for this position
+                    except Exception as e:
+                        log.debug(f"Alligator exit check failed for {sym}: {e}")
                 
                 # Check for Time-Based Exits first
                 intent = intents.get(sym)

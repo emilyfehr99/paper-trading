@@ -575,9 +575,19 @@ class V1RulesSignalEngine(BaseStrategy):
             if htf_ok_long and alligator_up and rsi_ok_momo and above_ema and macd_bull and above_vwap and vol_ok_momo:
                 return StrategySignal(symbol, "BUY", "crypto_macd_alligator_momo", features=features)
 
-        # Setup A: pullback entry (original)
-        if htf_ok_long and rsi_pullback and above_ema and macd_ok_long and vwap_ok_long and vol_ok_long:
-            return StrategySignal(symbol, "BUY", "long_rsi_macd_vwap_volume", features=features)
+        # Setup A: Alligator entry (replaces pullback entry)
+        alligator_lips_above_teeth = bool(
+            (not pd.isna(last.get("alligator_lips")))
+            and (not pd.isna(last.get("alligator_teeth")))
+            and float(last.get("alligator_lips")) > float(last.get("alligator_teeth"))
+        )
+        price_above_teeth = bool(
+            (not pd.isna(last.get("alligator_teeth")))
+            and float(last["close"]) > float(last.get("alligator_teeth"))
+        )
+        
+        if htf_ok_long and alligator_lips_above_teeth and price_above_teeth and vol_ok_long:
+            return StrategySignal(symbol, "BUY", "long_alligator_entry", features=features)
 
         # Setup B (aggressive): momentum continuation
         if self._aggressive_mode:

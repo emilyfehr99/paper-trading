@@ -150,6 +150,7 @@ class Settings(BaseSettings):
 
     # Smarter exits (in addition to TP/SL brackets)
     max_hold_minutes: float = Field(default=0.0, alias="MAX_HOLD_MINUTES")  # 0 disables time-exit
+    alligator_exit_enabled: bool = Field(default=True, alias="ALLIGATOR_EXIT_ENABLED")
     model_exit_enabled: bool = Field(default=False, alias="MODEL_EXIT_ENABLED")
     model_exit_min_proba: float = Field(default=0.45, alias="MODEL_EXIT_MIN_PROBA")
     dynamic_hold_enabled: bool = Field(default=True, alias="DYNAMIC_HOLD_ENABLED")
