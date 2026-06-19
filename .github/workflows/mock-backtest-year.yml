@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 60
     if: ${{ (github.event_name == 'schedule') || (github.event.inputs.market == '' || github.event.inputs.market == 'both' || github.event.inputs.market == 'equity') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -121,7 +121,7 @@ jobs:
     timeout-minutes: 360
     if: ${{ (github.event_name == 'schedule') || (github.event.inputs.market == '' || github.event.inputs.market == 'both' || github.event.inputs.market == 'crypto') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -188,7 +188,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -281,7 +281,7 @@ jobs:
         (needs.build_equity_shards.result == 'success' || needs.build_equity_shards.result == 'skipped')
       }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
