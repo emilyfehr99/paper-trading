@@ -72,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
@@ -82,7 +82,7 @@ jobs:
         run: |
           echo "d=$(python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('America/New_York')).date().isoformat())")" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: state
           # Cache keys are immutable; use a unique key per run and restore the newest via restore-keys.
@@ -92,7 +92,7 @@ jobs:
             alpaca-paper-state-${{ runner.os }}-ml-${{ steps.nydate.outputs.d }}-
             alpaca-paper-state-${{ runner.os }}-
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: state/models
           key: alpaca-paper-models-${{ runner.os }}-${{ steps.nydate.outputs.d }}-${{ github.run_id }}
@@ -100,7 +100,7 @@ jobs:
             alpaca-paper-models-${{ runner.os }}-${{ steps.nydate.outputs.d }}-
             alpaca-paper-models-${{ runner.os }}-
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: state/ledgers
           key: alpaca-paper-ledgers-${{ runner.os }}-${{ steps.nydate.outputs.d }}-${{ github.run_id }}

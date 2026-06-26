@@ -32,13 +32,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
 
       - name: Cache state (crypto)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           # Must match STATE_DIR below — ledger lives in state_crypto/, not state/.
           path: state_crypto
