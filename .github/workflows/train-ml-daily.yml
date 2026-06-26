@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
@@ -31,7 +31,7 @@ jobs:
           echo "d=$(python3 -c "from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo('America/New_York')).date().isoformat())")" >> "$GITHUB_OUTPUT"
 
       - name: Restore state (ledger + models)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: state
           # Cache keys are immutable; write ML runs to a unique key, and let the live tick restore the newest via restore-keys.

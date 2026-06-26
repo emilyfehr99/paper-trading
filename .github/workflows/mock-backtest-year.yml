@@ -60,7 +60,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
@@ -127,13 +127,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
 
       - name: Cache mock data (crypto)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             state/mock_cache/crypto
@@ -194,13 +194,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
 
       - name: Cache mock data (equity)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             state/mock_cache/equity_1m
@@ -287,7 +287,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml') }}
@@ -296,7 +296,7 @@ jobs:
         run: pip install -e .
 
       - name: Restore previous sim_rollup (to accumulate)
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: state/ledgers/sim_rollup.sqlite3
           key: sim-rollup-${{ runner.os }}-${{ github.run_id }}
