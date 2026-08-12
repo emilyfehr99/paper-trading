@@ -20,6 +20,7 @@ def main() -> None:
         default="",
         help="CSV TradingView symbols (optional). If empty, uses DEFAULT_DAYTRADE_SYMBOLS.",
     )
+    p.add_argument("--max-price", type=float, default=150.0, help="Only rank symbols with last close <= this")
     p.add_argument("--out", default="out/top_daytrading.json")
     args = p.parse_args()
 
@@ -34,6 +35,7 @@ def main() -> None:
         resolution=args.resolution,  # type: ignore[arg-type]
         limit=args.limit,
         metric=args.metric,  # type: ignore[arg-type]
+        max_price=args.max_price,
     )
 
     out_path = Path(args.out)

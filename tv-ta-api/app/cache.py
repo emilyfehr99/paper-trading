@@ -56,9 +56,17 @@ class Cache:
         val = self._memory.get(key)
         return val
 
-    def set_json(self, key: str, value: dict[str, Any]) -> None:
+    def set_json(
+        self, key: str, value: dict[str, Any], *, ttl_seconds: int | None = None
+    ) -> None:
+        ttl = int(ttl_seconds if ttl_seconds is not None else self.ttl_seconds)
         if self._redis is not None:
-            self._redis.setex(key, self.ttl_seconds, json.dumps(value, separators=(",", ":")))
+            self._redis.setex(key, ttl, json.dumps(value, separators=(",", ":")))
+            return
+        if ttl != self.ttl_seconds:
+            self._memory._store[key] = CacheEntry(
+                expires_at=time.time() + ttl, value=value
+            )
             return
         self._memory.set(key, value)
 

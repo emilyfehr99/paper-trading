@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import os
+import threading
 from dataclasses import dataclass
 from typing import Literal
 
@@ -8,6 +11,12 @@ import yfinance as yf
 
 from .symbols import normalize_symbol_for_yfinance
 
+logger = logging.getLogger(__name__)
+
+# Bound concurrent TV/yfinance pulls. Unbounded 4-bot tip scans used to pile up
+# inside uvicorn's threadpool and starve /health → false recycle stampedes.
+_OHLCV_SLOTS = max(1, int(os.getenv("TVTA_OHLCV_CONCURRENCY", "3")))
+_ohlcv_sem = threading.Semaphore(_OHLCV_SLOTS)
 
 Resolution = Literal[
     # TradingView-style
@@ -69,6 +78,25 @@ class Bars:
     df: pd.DataFrame  # index is tz-aware timestamps
 
 
+def ohlcv_provider_mode() -> str:
+    """auto | yfinance | tradingview"""
+    return os.getenv("TVTA_OHLCV_PROVIDER", "auto").strip().lower()
+
+
+def _use_tradingview(symbol: str, start_ts: int | None, end_ts: int | None) -> bool:
+    mode = ohlcv_provider_mode()
+    if mode == "yfinance":
+        return False
+    if mode == "tradingview":
+        return True
+    # auto
+    if start_ts is not None and end_ts is not None:
+        return True
+    from .tradingview_provider import is_futures_like_symbol
+
+    return is_futures_like_symbol(symbol)
+
+
 def _yf_interval(resolution: Resolution) -> str:
     resolution = normalize_resolution(resolution)
     return {
@@ -92,20 +120,24 @@ def _resample_rule(resolution: Resolution) -> str | None:
 
 
 def _yf_period(resolution: Resolution, count: int) -> str:
-    # yfinance intraday has limits; keep it simple for a demo provider.
     resolution = normalize_resolution(resolution)
-    if resolution in {"1", "5", "15", "30", "60", "120", "240"}:
+    if resolution == "1":
+        return "7d"
+    if resolution in {"5", "15", "30"}:
+        return "60d"
+    if resolution in {"60", "120", "240"}:
         return "60d"
     if resolution == "1D":
         return "2y"
     return "5y"
 
 
-def fetch_ohlcv(symbol: str, resolution: Resolution, count: int, extra_bars: int = 200) -> Bars:
-    """
-    Fetch OHLCV bars for indicator computation.
-    Returns at least `count` rows (usually more due to indicator warmup needs).
-    """
+def _fetch_yfinance(
+    symbol: str,
+    resolution: Resolution,
+    count: int,
+    extra_bars: int,
+) -> pd.DataFrame:
     yf_symbol = normalize_symbol_for_yfinance(symbol)
     resolution = normalize_resolution(resolution)
     interval = _yf_interval(resolution)
@@ -120,12 +152,10 @@ def fetch_ohlcv(symbol: str, resolution: Resolution, count: int, extra_bars: int
         threads=True,
     )
     if df is None or df.empty:
-        return Bars(df=pd.DataFrame())
+        return pd.DataFrame()
 
-    # yfinance may return a MultiIndex columns frame (e.g. ("Close","NVDA")).
     if isinstance(df.columns, pd.MultiIndex):
         df = df.copy()
-        # Prefer the price field names (Open/High/Low/Close/Volume) as the column names.
         df.columns = [c[0] for c in df.columns.to_list()]
 
     df = df.rename(
@@ -155,6 +185,81 @@ def fetch_ohlcv(symbol: str, resolution: Resolution, count: int, extra_bars: int
             out["volume"] = v
         df = out
 
-    df = df.tail(count + extra_bars)
-    return Bars(df=df)
+    return df.tail(count + extra_bars)
 
+
+def fetch_ohlcv(
+    symbol: str,
+    resolution: Resolution,
+    count: int,
+    extra_bars: int = 200,
+    *,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> Bars:
+    """
+    Fetch OHLCV bars for indicator computation.
+
+    Provider selection (``TVTA_OHLCV_PROVIDER``):
+      - ``auto`` (default): TradingView for futures + explicit date ranges; yfinance otherwise
+      - ``tradingview``: always use tvkit / TradingView WebSocket
+      - ``yfinance``: legacy 60-day intraday cap
+
+    Deep history (Feb/Mar etc.) uses named quarterly contracts automatically via tvkit;
+    no login required. Continuous symbols (MNQ1!) are a secondary fallback.
+    """
+    with _ohlcv_sem:
+        return _fetch_ohlcv_unlocked(
+            symbol,
+            resolution,
+            count,
+            extra_bars,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+
+
+def _fetch_ohlcv_unlocked(
+    symbol: str,
+    resolution: Resolution,
+    count: int,
+    extra_bars: int = 200,
+    *,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> Bars:
+    resolution = normalize_resolution(resolution)
+
+    if _use_tradingview(symbol, start_ts, end_ts):
+        from .tradingview_provider import fetch_ohlcv_tradingview
+
+        df = fetch_ohlcv_tradingview(
+            symbol,
+            resolution,
+            count,
+            extra_bars,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+        if not df.empty:
+            logger.info(
+                "TradingView OHLCV %s %s bars=%d (%s → %s)",
+                symbol,
+                resolution,
+                len(df),
+                df.index.min(),
+                df.index.max(),
+            )
+            return Bars(df=df)
+        if ohlcv_provider_mode() == "tradingview":
+            return Bars(df=pd.DataFrame())
+        logger.warning("TradingView empty for %s — falling back to yfinance", symbol)
+
+    df = _fetch_yfinance(symbol, resolution, count, extra_bars)
+
+    if start_ts is not None:
+        df = df[df.index >= pd.to_datetime(start_ts, unit="s", utc=True)]
+    if end_ts is not None:
+        df = df[df.index <= pd.to_datetime(end_ts, unit="s", utc=True)]
+
+    return Bars(df=df)

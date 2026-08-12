@@ -7,6 +7,9 @@ from typing import Any, Iterable
 import pandas as pd
 import pandas_ta as ta
 
+from app.bill_williams import macd_histogram_latest, williams_alligator_latest
+from app.stoch_v_rsi import stoch_v_rsi_latest
+
 
 @dataclass(frozen=True)
 class IndicatorSpec:
@@ -64,6 +67,26 @@ def parse_indicator_list(indicators: str) -> list[IndicatorSpec]:
         elif name == "atr":
             length = int(arg) if arg else 14
             out.append(IndicatorSpec(name="atr", params={"length": length}))
+        elif name in {"alligator", "williams_alligator", "ag"}:
+            out.append(IndicatorSpec(name="alligator", params={}))
+        elif name in {"stochrsi", "stoch_v_rsi", "stoch_rsi"}:
+            if arg and "|" in arg:
+                params = {}
+                for part in arg.split("|"):
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        params[k.strip()] = int(v.strip())
+            elif arg and "-" in arg:
+                parts = [int(x) for x in arg.split("-")]
+                params = {
+                    "length_rsi": parts[0],
+                    "length_stoch": parts[1] if len(parts) > 1 else 14,
+                    "smooth_k": parts[2] if len(parts) > 2 else 3,
+                    "smooth_d": parts[3] if len(parts) > 3 else 3,
+                }
+            else:
+                params = {}
+            out.append(IndicatorSpec(name="stochrsi", params=params))
         else:
             # Generic form: indicator[:k=v|k=v|...] or indicator (no params)
             params: dict[str, Any] = {}
@@ -128,20 +151,21 @@ def compute_latest(df: pd.DataFrame, specs: Iterable[IndicatorSpec]) -> dict[str
             fast = int(spec.params["fast"])
             slow = int(spec.params["slow"])
             signal = int(spec.params["signal"])
-            macd_df = ta.macd(df["close"], fast=fast, slow=slow, signal=signal)
-            if macd_df is None or macd_df.empty:
-                out["macd"] = float("nan")
-                out["macd_signal"] = float("nan")
-            else:
-                # pandas_ta column names: MACD_{fast}_{slow}_{signal}, MACDs_..., MACDh_...
-                macd_col = next((c for c in macd_df.columns if c.startswith("MACD_")), None)
-                sig_col = next((c for c in macd_df.columns if c.startswith("MACDs_")), None)
-                if macd_col:
-                    s = macd_df[macd_col].dropna()
-                    out["macd"] = float(s.iloc[-1]) if not s.empty else float("nan")
-                if sig_col:
-                    s = macd_df[sig_col].dropna()
-                    out["macd_signal"] = float(s.iloc[-1]) if not s.empty else float("nan")
+            out.update(macd_histogram_latest(df, fast=fast, slow=slow, signal=signal))
+
+        elif spec.name == "alligator":
+            out.update(williams_alligator_latest(df))
+
+        elif spec.name == "stochrsi":
+            out.update(
+                stoch_v_rsi_latest(
+                    df,
+                    length_rsi=int(spec.params.get("length_rsi", 14)),
+                    length_stoch=int(spec.params.get("length_stoch", 14)),
+                    smooth_k=int(spec.params.get("smooth_k", 3)),
+                    smooth_d=int(spec.params.get("smooth_d", 3)),
+                )
+            )
 
         elif spec.name == "bbands":
             length = int(spec.params["length"])
@@ -242,7 +266,7 @@ def compute_series(
     indicator: str,
     period: int,
     count: int,
-) -> list[dict[str, float | int]]:
+) -> list[dict[str, Any]]:
     _require_ohlc(df)
     if df.empty:
         return []
@@ -262,6 +286,44 @@ def compute_series(
             raise ValueError("VWAP requires volume")
         # VWAP isn't really "period"-based, but we keep the query shape stable.
         key_series = ta.vwap(df["high"], df["low"], df["close"], df["volume"])
+    elif ind == "macd":
+        macd_df = ta.macd(df["close"], fast=12, slow=26, signal=9)
+        if macd_df is None or macd_df.empty:
+            return []
+        macd_col = next((c for c in macd_df.columns if str(c).startswith("MACD_")), None)
+        sig_col = next((c for c in macd_df.columns if str(c).startswith("MACDs_")), None)
+        hist_col = next((c for c in macd_df.columns if str(c).startswith("MACDh_")), None)
+        if not (macd_col and sig_col and hist_col):
+            return []
+        macd_df = macd_df.dropna().tail(count)
+        pts: list[dict[str, Any]] = []
+        for ts, row in macd_df.iterrows():
+            pts.append({
+                "t": int(pd.Timestamp(ts).timestamp()),
+                "macd": float(row[macd_col]),
+                "signal": float(row[sig_col]),
+                "hist": float(row[hist_col]),
+            })
+        return pts
+    elif ind in {"alligator", "williams_alligator", "ag"}:
+        ag_df = ta.alligator(df["close"])
+        if ag_df is None or ag_df.empty:
+            return []
+        jaw_c = next((c for c in ag_df.columns if str(c).startswith("AGj")), None)
+        teeth_c = next((c for c in ag_df.columns if str(c).startswith("AGt")), None)
+        lips_c = next((c for c in ag_df.columns if str(c).startswith("AGl")), None)
+        if not (jaw_c and teeth_c and lips_c):
+            return []
+        ag_df = ag_df.dropna().tail(count)
+        pts: list[dict[str, Any]] = []
+        for ts, row in ag_df.iterrows():
+            pts.append({
+                "t": int(pd.Timestamp(ts).timestamp()),
+                "jaw": float(row[jaw_c]),
+                "teeth": float(row[teeth_c]),
+                "lips": float(row[lips_c]),
+            })
+        return pts
     else:
         raise ValueError(f"Unsupported indicator for series: {indicator}")
 
@@ -269,8 +331,8 @@ def compute_series(
         return []
 
     key_series = key_series.dropna().tail(count)
-    pts: list[dict[str, float | int]] = []
+    pts_simple: list[dict[str, Any]] = []
     for ts, v in key_series.items():
-        pts.append({"t": int(pd.Timestamp(ts).timestamp()), "v": float(v)})
-    return pts
+        pts_simple.append({"t": int(pd.Timestamp(ts).timestamp()), "v": float(v)})
+    return pts_simple
 
