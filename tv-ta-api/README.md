@@ -4,7 +4,18 @@ Custom **TradingView-style** indicator server (symbol prefixes, resolutions, bat
 OHLCV comes from **TradingView via tvkit** (default for futures and date-range requests) or **yfinance**
 (legacy 60-day intraday cap). Indicators are computed locally using the same conventions as TV charts.
 
-**Ops port for macd-scanner-bot:** `http://127.0.0.1:8010` (`TVTA_PORT=8010`).
+**Ops port for macd-scanner-bot + GBT paper + DI alerts:** `http://127.0.0.1:8010` (`TVTA_PORT=8010`).
+
+**Never use `:8000` for futures ops** — impostors (e.g. Prometheus) and wrong-port recycle stampedes historically killed a healthy `:8010` API. Canonical consumer runbook: `macd-scanner-bot/docs/TVTA.md`.
+
+## Ops reliability (2026-08)
+
+| Rule | Detail |
+|------|--------|
+| Default bind | `scripts/launch_tvta.sh` → `TVTA_PORT=8010` |
+| Adopt | If `:8010` already serves `/health` `status:ok`, adopt — do not kill other ports’ pids |
+| `/ws/ta` | OHLCV fetch off event loop (`asyncio.to_thread`); tip `count` capped |
+| Health | Consumers use `macd-scanner-bot/scripts/tvta_curl_health.sh` (15s `/health`, auth cache) |
 
 ## Futures symbols (important)
 
@@ -109,9 +120,10 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# macd-scanner-bot expects :8010
+# macd-scanner-bot expects :8010 only (never :8000)
 uvicorn app.main:app --host 127.0.0.1 --port 8010
-# or: bash ../scripts/launch_tvta.sh  (from alpaca-paper-day-bot)
+# preferred: bash ../scripts/launch_tvta.sh
+# from macd: bash scripts/ensure_tvta.sh && bash scripts/tvta_curl_health.sh 127.0.0.1 8010 poll
 ```
 
 Open docs at `http://127.0.0.1:8010/docs`.
