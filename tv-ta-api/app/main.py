@@ -588,6 +588,60 @@ def ta_history(
     return HistoryResponse(**payload)
 
 
+@app.get("/api/ta/ticks")
+def ta_ticks(
+    symbol: str,
+    resolution: Resolution = "1S",
+    count: int = Query(500, ge=10, le=20000),
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> dict:
+    """
+    Get high-resolution 1-second pseudo-tick OHLCV data from TradingView WebSocket.
+    """
+    try:
+        res = normalize_resolution(resolution)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    bars = fetch_ohlcv(
+        symbol=symbol,
+        resolution=res,
+        count=count,
+        extra_bars=0,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
+    df = bars.df
+    if df.empty:
+        return {"symbol": symbol, "resolution": res, "count": 0, "points": []}
+
+    if start_ts is not None:
+        df = df[df.index >= pd.to_datetime(start_ts, unit="s", utc=True)]
+    if end_ts is not None:
+        df = df[df.index <= pd.to_datetime(end_ts, unit="s", utc=True)]
+
+    pts = []
+    for ts, row in df.iterrows():
+        pts.append(
+            {
+                "t": int(pd.Timestamp(ts).timestamp()),
+                "o": float(row["open"]),
+                "h": float(row["high"]),
+                "l": float(row["low"]),
+                "c": float(row["close"]),
+                "v": float(row.get("volume", 0) or 0.0),
+            }
+        )
+
+    return {
+        "symbol": symbol,
+        "resolution": res,
+        "count": len(pts),
+        "points": pts,
+    }
+
+
 @app.get("/api/ta/tip", response_model=TipResponse)
 def ta_tip(
     symbol: str,

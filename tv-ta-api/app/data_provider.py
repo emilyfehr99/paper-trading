@@ -20,6 +20,10 @@ _ohlcv_sem = threading.Semaphore(_OHLCV_SLOTS)
 
 Resolution = Literal[
     # TradingView-style
+    "1S",
+    "5S",
+    "15S",
+    "30S",
     "1",
     "5",
     "15",
@@ -30,6 +34,10 @@ Resolution = Literal[
     "1D",
     "1W",
     # Back-compat (also accepted)
+    "1s",
+    "5s",
+    "15s",
+    "30s",
     "1m",
     "5m",
     "15m",
@@ -43,6 +51,10 @@ Resolution = Literal[
 def normalize_resolution(resolution: str) -> Resolution:
     r = resolution.strip()
     mapping: dict[str, str] = {
+        "1s": "1S",
+        "5s": "5S",
+        "15s": "15S",
+        "30s": "30S",
         "1m": "1",
         "5m": "5",
         "15m": "15",
@@ -58,6 +70,10 @@ def normalize_resolution(resolution: str) -> Resolution:
     }
     r = mapping.get(r, r)
     allowed = {
+        "1S",
+        "5S",
+        "15S",
+        "30S",
         "1",
         "5",
         "15",
@@ -100,6 +116,10 @@ def _use_tradingview(symbol: str, start_ts: int | None, end_ts: int | None) -> b
 def _yf_interval(resolution: Resolution) -> str:
     resolution = normalize_resolution(resolution)
     return {
+        "1S": "1m",
+        "5S": "1m",
+        "15S": "1m",
+        "30S": "1m",
         "1": "1m",
         "5": "5m",
         "15": "15m",
@@ -121,7 +141,7 @@ def _resample_rule(resolution: Resolution) -> str | None:
 
 def _yf_period(resolution: Resolution, count: int) -> str:
     resolution = normalize_resolution(resolution)
-    if resolution == "1":
+    if resolution in {"1S", "5S", "15S", "30S", "1"}:
         return "7d"
     if resolution in {"5", "15", "30"}:
         return "60d"

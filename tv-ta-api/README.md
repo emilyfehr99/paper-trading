@@ -15,7 +15,9 @@ OHLCV comes from **TradingView via tvkit** (default for futures and date-range r
 | Default bind | `scripts/launch_tvta.sh` → `TVTA_PORT=8010` |
 | Adopt | If `:8010` already serves `/health` `status:ok`, adopt — do not kill other ports’ pids |
 | `/ws/ta` | OHLCV fetch off event loop (`asyncio.to_thread`); tip `count` capped |
+| `/api/ta/history` + `/api/ta/tip` | **`count` ge=50** (422 below) — consumers clamp via `clamp_tvta_history_count` |
 | Health | Consumers use `macd-scanner-bot/scripts/tvta_curl_health.sh` (15s `/health`, auth cache) |
+| Live smoke | `macd-scanner-bot/scripts/smoke_live_imports.py` must PASS (enrich helpers + limits) |
 
 ## Futures symbols (important)
 

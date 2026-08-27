@@ -45,6 +45,10 @@ _TV_SYMBOL_MAP: dict[str, str] = {
 }
 
 _INTERVAL_SECONDS: dict[str, int] = {
+    "1S": 1,
+    "5S": 5,
+    "15S": 15,
+    "30S": 30,
     "1": 60,
     "5": 300,
     "15": 900,
@@ -548,7 +552,32 @@ async def _fetch_range_async(
     est = _estimate_bars_for_range(start, end, resolution)
     min_viable = max(int(est * 0.15), 50)
 
-    if normalize_resolution(resolution) == "1":
+    res_norm = normalize_resolution(resolution)
+    if res_norm in {"1S", "5S", "15S", "30S"}:
+        df = await _fetch_continuous_only(symbol, resolution, start, end)
+        if df.empty or len(df) < min_viable:
+            try:
+                tail = _clip_frame(
+                    await _fetch_count_once(symbol, resolution, max(est, 500)),
+                    start,
+                    end,
+                )
+                if not tail.empty:
+                    df = _clip_frame(_merge_frames([df, tail]), start, end)
+            except Exception as exc:
+                logger.debug("Second resolution continuous pull failed for %s: %s", symbol, exc)
+        if not df.empty:
+            logger.info(
+                "TradingView %s continuous %s bars=%d (%s → %s)",
+                res_norm,
+                symbol,
+                len(df),
+                df.index.min(),
+                df.index.max(),
+            )
+        return _clip_frame(df, start, end)
+
+    if res_norm == "1":
         df = await _fetch_contract_daily(symbol, resolution, start, end)
         if len(df) < min_viable:
             try:
